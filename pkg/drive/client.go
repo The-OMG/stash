@@ -84,14 +84,32 @@ func retryable(fn func() error) error {
 		}
 
 		var gerr *googleapi.Error
-		if errors.As(err, &gerr) && (gerr.Code == 403 || gerr.Code == 429 || gerr.Code >= 500) {
-			time.Sleep(delay)
-			delay *= 2
-			continue
+		if errors.As(err, &gerr) {
+			// Retry transient errors only. A 403 is retried solely for rate-limit
+			// reasons; permanent 403s (insufficientFilePermissions /
+			// cannotDownloadFile) must fail fast — important on the stream path.
+			retry := gerr.Code == 429 || gerr.Code >= 500 || (gerr.Code == 403 && isRateLimitErr(gerr))
+			if retry {
+				time.Sleep(delay)
+				delay *= 2
+				continue
+			}
 		}
 		return err
 	}
 	return err
+}
+
+// isRateLimitErr reports whether a 403 is a rate-limit (retryable) rather than a
+// permanent permission/quota error.
+func isRateLimitErr(gerr *googleapi.Error) bool {
+	for _, e := range gerr.Errors {
+		switch e.Reason {
+		case "rateLimitExceeded", "userRateLimitExceeded", "dailyLimitExceeded", "sharingRateLimitExceeded":
+			return true
+		}
+	}
+	return false
 }
 
 // ListDrive enumerates every non-trashed item in a shared drive, invoking cb

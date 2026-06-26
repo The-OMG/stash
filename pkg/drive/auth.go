@@ -58,6 +58,9 @@ func NewOAuthSource(ctx context.Context, clientID, clientSecret, scope string, t
 		clientID = rcloneDefaultClientID
 		clientSecret = rcloneDefaultClientSecret
 	}
+	// The token source is long-lived and refreshes on its own schedule, so it
+	// must not capture a request/init context that may later be cancelled.
+	ctx = context.WithoutCancel(ctx)
 	conf := &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
@@ -166,6 +169,10 @@ func (p *SAPool) serviceFor(ctx context.Context, file string) (*drive.Service, e
 		return svc, nil
 	}
 
+	// The service (and its token source) is cached for the pool's lifetime, so
+	// it must not capture a request/init context that may later be cancelled.
+	ctx = context.WithoutCancel(ctx)
+
 	data, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
@@ -210,7 +217,8 @@ func (p *SAPool) Token(ctx context.Context) (string, error) {
 			p.mu.Unlock()
 			return "", err
 		}
-		creds, err := google.CredentialsFromJSON(ctx, data, p.scope)
+		// cached for the pool lifetime — detach from the request context.
+		creds, err := google.CredentialsFromJSON(context.WithoutCancel(ctx), data, p.scope)
 		if err != nil {
 			p.mu.Unlock()
 			return "", err

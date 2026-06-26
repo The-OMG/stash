@@ -20,8 +20,11 @@ const deleteFileSuffix = ".delete"
 // Deleter's mark/commit/rollback model. Installed by the manager.
 type RemoteTrasher interface {
 	IsManaged(path string) bool
-	Trash(path string) error
-	Untrash(path string) error
+	// Trash moves the path to the remote trash and returns an opaque handle
+	// (capturing the remote file id) used to restore it on rollback.
+	Trash(path string) (handle string, err error)
+	// Untrash restores a file from the remote trash using a handle from Trash.
+	Untrash(handle string) error
 }
 
 // DriveTrasher, if set, intercepts deletion of managed remote paths.
@@ -130,12 +133,15 @@ func (d *Deleter) FilesWithoutTrash(paths []string) error {
 
 func (d *Deleter) filesInternal(paths []string, bypassTrash bool) error {
 	for _, p := range paths {
-		// Remote (Drive) paths: move to the remote's trash (reversible).
+		// Remote (Drive) paths: move to the remote's trash (reversible). Store
+		// the returned handle (carrying the file id) so rollback can restore
+		// deterministically even if the path index changed meanwhile.
 		if DriveTrasher != nil && DriveTrasher.IsManaged(p) {
-			if err := DriveTrasher.Trash(p); err != nil {
+			handle, err := DriveTrasher.Trash(p)
+			if err != nil {
 				return fmt.Errorf("trashing remote file %q: %w", p, err)
 			}
-			d.managed = append(d.managed, p)
+			d.managed = append(d.managed, handle)
 			continue
 		}
 
@@ -205,11 +211,11 @@ func (d *Deleter) Rollback() {
 		}
 	}
 
-	// restore remote files from the remote's trash
-	for _, f := range d.managed {
+	// restore remote files from the remote's trash, by handle (carries file id)
+	for _, handle := range d.managed {
 		if DriveTrasher != nil {
-			if err := DriveTrasher.Untrash(f); err != nil {
-				logger.Warnf("Error restoring remote file %q: %v", f, err)
+			if err := DriveTrasher.Untrash(handle); err != nil {
+				logger.Warnf("Error restoring remote file: %v", err)
 			}
 		}
 	}

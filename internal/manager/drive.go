@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/stashapp/stash/pkg/drive"
 	"github.com/stashapp/stash/pkg/file"
 	"github.com/stashapp/stash/pkg/logger"
 	"github.com/stashapp/stash/pkg/mediapath"
+	"google.golang.org/api/googleapi"
 )
 
 // defaultDriveCacheBytes caps each source's on-demand media cache (50 GiB).
@@ -130,7 +132,8 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 
 	for _, sc := range cfg.Sources {
 		if sc.ID == "" || (sc.DriveID == "" && sc.RcloneRemote == "") {
-			logger.Warnf("drive: skipping source missing id or drive_id/rclone_remote: %+v", sc)
+			// don't %+v the config — it carries client_secret / oauth token.
+			logger.Warnf("drive: skipping source %q: missing id or drive_id/rclone_remote", sc.ID)
 			continue
 		}
 
@@ -222,16 +225,39 @@ func (s *Manager) StreamDriveDirect(w http.ResponseWriter, r *http.Request, path
 		return false
 	}
 
+	h := w.Header()
+	h.Set("Accept-Ranges", "bytes")
+
+	// HEAD: answer from index metadata; never fetch the body. (A HEAD that
+	// downloaded the whole file would burn Drive egress — e.g. DLNA renderers
+	// send HEAD to learn Content-Length before playback.)
+	if r.Method == http.MethodHead {
+		if it.MimeType != "" {
+			h.Set("Content-Type", it.MimeType)
+		}
+		h.Set("Content-Length", strconv.FormatInt(it.Size, 10))
+		w.WriteHeader(http.StatusOK)
+		return true
+	}
+
 	resp, err := ms.source.StreamRange(r.Context(), it.ID, r.Header.Get("Range"))
 	if err != nil {
-		logger.Errorf("drive[%s]: stream %s: %v", ms.cfg.ID, rel, err)
-		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		// Propagate client-meaningful upstream statuses (416 range-not-satisfiable,
+		// 404) instead of collapsing everything to 502.
+		var gerr *googleapi.Error
+		if errors.As(err, &gerr) && gerr.Code >= 400 && gerr.Code < 500 {
+			if cr := gerr.Header.Get("Content-Range"); cr != "" {
+				h.Set("Content-Range", cr)
+			}
+			http.Error(w, http.StatusText(gerr.Code), gerr.Code)
+		} else {
+			logger.Errorf("drive[%s]: stream %s: %v", ms.cfg.ID, rel, err)
+			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		}
 		return true
 	}
 	defer resp.Body.Close()
 
-	h := w.Header()
-	h.Set("Accept-Ranges", "bytes")
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		h.Set("Content-Type", ct)
 	}
@@ -265,36 +291,43 @@ func (s *Manager) IsManaged(path string) bool {
 	return ok
 }
 
-// Trash moves a Drive-backed file to the drive's trash (file.RemoteTrasher).
-func (s *Manager) Trash(path string) error {
+// Trash moves a Drive-backed file to the drive's trash and returns a handle
+// encoding the owning source id + Drive file id, so Untrash can restore it
+// deterministically without re-resolving the (possibly changed) path index.
+func (s *Manager) Trash(path string) (string, error) {
 	ms, rel, ok := s.driveSourceForPath(path)
 	if !ok {
-		return fmt.Errorf("not a drive path: %s", path)
+		return "", fmt.Errorf("not a drive path: %s", path)
 	}
 	it, found, err := ms.source.Index.LookupPath(rel)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !found {
-		return nil // already gone
+		return "", nil // already gone; nothing to restore
 	}
-	return ms.source.SetTrashed(context.Background(), it.ID, true)
+	if err := ms.source.SetTrashed(context.Background(), it.ID, true); err != nil {
+		return "", err
+	}
+	return ms.cfg.ID + "\x00" + it.ID, nil
 }
 
-// Untrash restores a previously-trashed Drive file (delete rollback).
-func (s *Manager) Untrash(path string) error {
-	ms, rel, ok := s.driveSourceForPath(path)
-	if !ok {
-		return fmt.Errorf("not a drive path: %s", path)
-	}
-	it, found, err := ms.source.Index.LookupPath(rel)
-	if err != nil {
-		return err
-	}
-	if !found {
+// Untrash restores a previously-trashed Drive file from its handle (delete
+// rollback). Restores by file id, independent of the path index.
+func (s *Manager) Untrash(handle string) error {
+	if handle == "" {
 		return nil
 	}
-	return ms.source.SetTrashed(context.Background(), it.ID, false)
+	srcID, fileID, ok := strings.Cut(handle, "\x00")
+	if !ok {
+		return fmt.Errorf("invalid trash handle")
+	}
+	for _, ms := range s.driveSources {
+		if ms.cfg.ID == srcID {
+			return ms.source.SetTrashed(context.Background(), fileID, false)
+		}
+	}
+	return fmt.Errorf("drive source %q not found to restore file", srcID)
 }
 
 // resolveThumb returns Drive's own thumbnail (JPEG bytes) for a Drive-backed
@@ -527,7 +560,8 @@ func (s *Manager) saveDriveSourcesConfig(cfg driveSourcesConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	// 0600: the file holds oauth refresh tokens / client secrets.
+	return os.WriteFile(path, data, 0o600)
 }
 
 // AddDriveSource validates Drive access, persists the source to the sidecar

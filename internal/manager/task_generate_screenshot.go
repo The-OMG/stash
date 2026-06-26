@@ -65,14 +65,20 @@ func (t *GenerateCoverTask) Start(ctx context.Context) {
 		Overwrite:    true,
 	}
 
-	// For Drive-backed scenes with a native thumbnail, use Drive's own thumbnail
-	// as the cover (no full download or ffmpeg). Otherwise generate it.
+	// For the DEFAULT cover (no specific timestamp requested) on a Drive-backed
+	// scene with a native thumbnail, use Drive's own thumbnail (no download or
+	// ffmpeg). When the user requested a specific timestamp, always generate.
 	var coverImageData []byte
 	var err error
-	if data, ok, terr := mediapath.ThumbData(videoFile.Path, 1280); terr == nil && ok {
-		logger.Debugf("Using Drive thumbnail as cover for %s", scenePath)
-		coverImageData = data
-	} else {
+	gotDriveCover := false
+	if t.ScreenshotAt == nil {
+		if data, ok, terr := mediapath.ThumbData(videoFile.Path, 1280); terr == nil && ok {
+			logger.Debugf("Using Drive thumbnail as cover for %s", scenePath)
+			coverImageData = data
+			gotDriveCover = true
+		}
+	}
+	if !gotDriveCover {
 		coverImageData, err = g.Screenshot(context.TODO(), videoFile.Path, videoFile.Width, videoFile.Duration, generate.ScreenshotOptions{
 			At: &at,
 		})

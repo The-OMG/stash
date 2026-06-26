@@ -19,6 +19,7 @@ import (
 
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/logger"
+	"github.com/stashapp/stash/pkg/mediapath"
 	"github.com/stashapp/stash/pkg/models"
 	"github.com/stashapp/stash/pkg/utils"
 
@@ -343,7 +344,13 @@ func (s *runningStream) makeStreamArgs(sm *StreamManager, segment int) Args {
 		args = args.Seek(float64(segment * segmentLength))
 	}
 
-	args = args.Input(s.vf.Path)
+	// Resolve Drive-backed paths to a local cached file for ffmpeg.
+	inputPath, rerr := mediapath.Resolve(s.vf.Path)
+	if rerr != nil {
+		logger.Errorf("error resolving segmented transcode input %q: %v", s.vf.Path, rerr)
+		inputPath = s.vf.Path
+	}
+	args = args.Input(inputPath)
 
 	videoOnly := ProbeAudioCodec(s.vf.AudioCodec) == MissingUnsupported
 
@@ -419,7 +426,11 @@ func serveHLSManifest(sm *StreamManager, w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	probeResult, err := sm.ffprobe.NewVideoFile(vf.Path)
+	probePath := vf.Path
+	if p, perr := mediapath.Resolve(vf.Path); perr == nil {
+		probePath = p
+	}
+	probeResult, err := sm.ffprobe.NewVideoFile(probePath)
 	if err != nil {
 		logger.Warnf("[transcode] error generating HLS manifest: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -488,7 +499,11 @@ func serveDASHManifest(sm *StreamManager, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	probeResult, err := sm.ffprobe.NewVideoFile(vf.Path)
+	probePath := vf.Path
+	if p, perr := mediapath.Resolve(vf.Path); perr == nil {
+		probePath = p
+	}
+	probeResult, err := sm.ffprobe.NewVideoFile(probePath)
 	if err != nil {
 		logger.Warnf("[transcode] error generating DASH manifest: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
