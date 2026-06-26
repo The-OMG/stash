@@ -40,6 +40,27 @@ func (d *Decorator) Decorate(ctx context.Context, fs models.FS, f models.File) (
 		return decorateFallback(fs, f)
 	}
 
+	// Fast path: for unambiguous static images (jpg/png) where the backend
+	// already knows the dimensions (e.g. Drive's imageMediaMetadata), skip
+	// ffprobe entirely.
+	switch strings.ToLower(filepath.Ext(base.Path)) {
+	case ".jpg", ".jpeg", ".png":
+		if m, ok, _ := mediapath.MediaMeta(base.Path); ok && m.Width > 0 && m.Height > 0 {
+			format := "jpeg"
+			if strings.EqualFold(filepath.Ext(base.Path), ".png") {
+				format = "png"
+			}
+			ret := &models.ImageFile{
+				BaseFile: base,
+				Format:   format,
+				Width:    int(m.Width),
+				Height:   int(m.Height),
+			}
+			adjustForOrientation(fs, base.Path, ret)
+			return ret, nil
+		}
+	}
+
 	// Drive-backed paths are probed via an authenticated ranged URL; local
 	// paths are probed directly by path.
 	var probe *ffmpeg.VideoFile

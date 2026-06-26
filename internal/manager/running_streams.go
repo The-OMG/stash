@@ -49,8 +49,13 @@ func (s *SceneServer) StreamSceneDirect(scene *models.Scene, w http.ResponseWrit
 
 	sceneHash := scene.GetHash(config.GetInstance().GetVideoFileNamingAlgorithm())
 
-	// For Drive-backed scenes, resolve the virtual path to a locally-cached
-	// file (downloading on demand). Local paths pass through unchanged.
+	// For Drive-backed scenes, proxy the byte range straight from Drive (no full
+	// download). Falls through for local files or when not a Drive path.
+	if GetInstance().StreamDriveDirect(w, r, scene.Path) {
+		return
+	}
+
+	// Otherwise resolve to a locally-cached file (downloading on demand).
 	scenePath, err := mediapath.Resolve(scene.Path)
 	if err != nil {
 		logger.Errorf("error resolving scene media path %q: %v", scene.Path, err)

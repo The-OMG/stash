@@ -3,10 +3,22 @@ query DriveSources {
     id
     name
     drive_id
+    root_folder_id
     keys_path
     scope
     cache_dir
     file_count
     mounted
+  }
+}
+
+query RcloneRemotes {
+  rcloneRemotes
+}
+
+query DriveBrowse($input: DriveBrowseInput!) {
+  driveBrowse(input: $input) {
+    id
+    name
   }
 }

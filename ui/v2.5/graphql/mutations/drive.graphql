@@ -3,6 +3,7 @@ mutation AddDriveSource($input: AddDriveSourceInput!) {
     id
     name
     drive_id
+    root_folder_id
     keys_path
     scope
     cache_dir

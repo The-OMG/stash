@@ -8,6 +8,7 @@ import {
 } from "src/core/generated-graphql";
 import { useToast } from "src/hooks/Toast";
 import { LoadingIndicator } from "../Shared/LoadingIndicator";
+import { DriveSourcePicker } from "./DriveSourcePicker";
 
 const emptyForm = {
   id: "",
@@ -27,6 +28,7 @@ export const DriveSourcesSection: React.FC = () => {
 
   const [form, setForm] = useState({ ...emptyForm });
   const [saving, setSaving] = useState(false);
+  const [pickerShow, setPickerShow] = useState(false);
 
   function set(field: keyof typeof emptyForm, value: string) {
     setForm((f) => ({ ...f, [field]: value }));
@@ -88,6 +90,14 @@ export const DriveSourcesSection: React.FC = () => {
         synced incrementally on each scan.
       </div>
       <Card>
+        <div className="mb-2">
+          <Button onClick={() => setPickerShow(true)}>Browse Google Drive…</Button>
+        </div>
+        <DriveSourcePicker
+          show={pickerShow}
+          onClose={() => setPickerShow(false)}
+          onAdded={() => refetch()}
+        />
         {error && <div className="text-danger">{error.message}</div>}
         {loading ? (
           <LoadingIndicator />

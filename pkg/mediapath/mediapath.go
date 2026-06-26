@@ -62,3 +62,23 @@ func ThumbData(path string, size int) (data []byte, ok bool, err error) {
 	}
 	return ThumbResolver(path, size)
 }
+
+// Meta holds native media metadata a backend can provide without reading the
+// file (e.g. Google Drive's videoMediaMetadata/imageMediaMetadata).
+type Meta struct {
+	Width      int64
+	Height     int64
+	DurationMS int64
+}
+
+// MetaResolver, if set, returns native metadata for a path. ok is false when no
+// native metadata is available (caller should probe the file itself).
+var MetaResolver func(path string) (Meta, bool, error)
+
+// MediaMeta returns native metadata for path.
+func MediaMeta(path string) (Meta, bool, error) {
+	if MetaResolver == nil {
+		return Meta{}, false, nil
+	}
+	return MetaResolver(path)
+}

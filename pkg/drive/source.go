@@ -75,6 +75,30 @@ func resizeThumbLink(link string, size int) string {
 	return link + "=s" + strconv.Itoa(size)
 }
 
+// StreamRange issues a ranged GET to Drive and returns the raw HTTP response
+// (200 or 206), so a handler can proxy the byte range straight to the browser
+// without downloading the whole file. Caller must close resp.Body.
+func (s *Source) StreamRange(ctx context.Context, fileID, rangeHeader string) (*http.Response, error) {
+	svc, err := s.Pool.Next(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var resp *http.Response
+	err = retryable(func() error {
+		call := svc.Files.Get(fileID).SupportsAllDrives(true)
+		if rangeHeader != "" {
+			call.Header().Set("Range", rangeHeader)
+		}
+		var e error
+		resp, e = call.Context(ctx).Download()
+		return e
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 // SetTrashed moves a Drive file to (or restores it from) the drive's trash.
 // Drive trash is reversible, which lets it back stash's delete rollback.
 func (s *Source) SetTrashed(ctx context.Context, fileID string, trashed bool) error {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,9 +188,62 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 	mediapath.ProbeResolver = s.resolveProbeTarget
 	mediapath.HeadReader = s.resolveHead
 	mediapath.ThumbResolver = s.resolveThumb
+	mediapath.MetaResolver = s.resolveMeta
 
 	// route deletion of Drive-backed files to the drive's trash (reversible).
 	file.DriveTrasher = s
+}
+
+// resolveMeta returns Drive's native dimensions/duration for a path so the
+// scanner can skip ffprobe where possible. ok is false for local paths.
+func (s *Manager) resolveMeta(path string) (mediapath.Meta, bool, error) {
+	ms, rel, ok := s.driveSourceForPath(path)
+	if !ok {
+		return mediapath.Meta{}, false, nil
+	}
+	it, found, err := ms.source.Index.LookupPath(rel)
+	if err != nil || !found {
+		return mediapath.Meta{}, false, err
+	}
+	return mediapath.Meta{Width: it.Width, Height: it.Height, DurationMS: it.DurationMS}, true, nil
+}
+
+// StreamDriveDirect proxies a direct-play request for a Drive-backed scene
+// straight from Drive (honoring the browser's Range header), without
+// downloading the whole file to cache. Returns false if path is not a mounted
+// Drive path (caller should fall back to local/cache serving).
+func (s *Manager) StreamDriveDirect(w http.ResponseWriter, r *http.Request, path string) bool {
+	ms, rel, ok := s.driveSourceForPath(path)
+	if !ok {
+		return false
+	}
+	it, found, err := ms.source.Index.LookupPath(rel)
+	if err != nil || !found {
+		return false
+	}
+
+	resp, err := ms.source.StreamRange(r.Context(), it.ID, r.Header.Get("Range"))
+	if err != nil {
+		logger.Errorf("drive[%s]: stream %s: %v", ms.cfg.ID, rel, err)
+		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		return true
+	}
+	defer resp.Body.Close()
+
+	h := w.Header()
+	h.Set("Accept-Ranges", "bytes")
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		h.Set("Content-Type", ct)
+	}
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		h.Set("Content-Range", cr)
+	}
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		h.Set("Content-Length", cl)
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body) //nolint:errcheck
+	return true
 }
 
 // driveSourceForPath returns the mounted source owning path and the
