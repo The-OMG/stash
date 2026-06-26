@@ -15,6 +15,18 @@ import (
 
 const deleteFileSuffix = ".delete"
 
+// RemoteTrasher handles deletion of remote (e.g. Google Drive) paths by moving
+// them to the remote's own trash, which is reversible — mapping onto the
+// Deleter's mark/commit/rollback model. Installed by the manager.
+type RemoteTrasher interface {
+	IsManaged(path string) bool
+	Trash(path string) error
+	Untrash(path string) error
+}
+
+// DriveTrasher, if set, intercepts deletion of managed remote paths.
+var DriveTrasher RemoteTrasher
+
 // RenamerRemover provides access to the Rename and Remove functions.
 type RenamerRemover interface {
 	Renamer
@@ -68,6 +80,7 @@ type Deleter struct {
 	RenamerRemover RenamerRemover
 	files          []string
 	dirs           []string
+	managed        []string          // remote (Drive) paths trashed via DriveTrasher
 	TrashPath      string            // if set, files will be moved to this directory instead of being permanently deleted
 	trashedPaths   map[string]string // map of original path -> trash path (only used when TrashPath is set)
 }
@@ -117,6 +130,15 @@ func (d *Deleter) FilesWithoutTrash(paths []string) error {
 
 func (d *Deleter) filesInternal(paths []string, bypassTrash bool) error {
 	for _, p := range paths {
+		// Remote (Drive) paths: move to the remote's trash (reversible).
+		if DriveTrasher != nil && DriveTrasher.IsManaged(p) {
+			if err := DriveTrasher.Trash(p); err != nil {
+				return fmt.Errorf("trashing remote file %q: %w", p, err)
+			}
+			d.managed = append(d.managed, p)
+			continue
+		}
+
 		// fail silently if the file does not exist
 		if _, err := d.RenamerRemover.Stat(p); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -183,8 +205,18 @@ func (d *Deleter) Rollback() {
 		}
 	}
 
+	// restore remote files from the remote's trash
+	for _, f := range d.managed {
+		if DriveTrasher != nil {
+			if err := DriveTrasher.Untrash(f); err != nil {
+				logger.Warnf("Error restoring remote file %q: %v", f, err)
+			}
+		}
+	}
+
 	d.files = nil
 	d.dirs = nil
+	d.managed = nil
 	d.trashedPaths = make(map[string]string)
 }
 
@@ -212,8 +244,10 @@ func (d *Deleter) Commit() {
 		}
 	}
 
+	// remote files were already moved to the remote trash in filesInternal
 	d.files = nil
 	d.dirs = nil
+	d.managed = nil
 	d.trashedPaths = make(map[string]string)
 }
 

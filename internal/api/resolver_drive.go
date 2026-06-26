@@ -39,21 +39,53 @@ func (r *queryResolver) DriveSources(ctx context.Context) ([]*DriveSource, error
 	return out, nil
 }
 
+func (r *queryResolver) RcloneRemotes(ctx context.Context) ([]string, error) {
+	return manager.GetInstance().RcloneRemotes()
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func (r *queryResolver) DriveBrowse(ctx context.Context, input DriveBrowseInput) ([]*DriveFolder, error) {
+	params := manager.DriveSourceParams{
+		DriveID:      deref(input.DriveID),
+		KeysPath:     deref(input.KeysPath),
+		Scope:        deref(input.Scope),
+		AuthType:     deref(input.AuthType),
+		ClientID:     deref(input.ClientID),
+		ClientSecret: deref(input.ClientSecret),
+		Token:        deref(input.Token),
+		RcloneRemote: deref(input.RcloneRemote),
+	}
+	folders, err := manager.GetInstance().BrowseDrive(ctx, params, deref(input.ParentID))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*DriveFolder, 0, len(folders))
+	for _, f := range folders {
+		out = append(out, &DriveFolder{ID: f.ID, Name: f.Name})
+	}
+	return out, nil
+}
+
 func (r *mutationResolver) AddDriveSource(ctx context.Context, input AddDriveSourceInput) (*DriveSource, error) {
 	params := manager.DriveSourceParams{
-		ID:       input.ID,
-		Name:     input.Name,
-		DriveID:  input.DriveID,
-		KeysPath: input.KeysPath,
-	}
-	if input.RootFolderID != nil {
-		params.RootFolderID = *input.RootFolderID
-	}
-	if input.Scope != nil {
-		params.Scope = *input.Scope
-	}
-	if input.CacheDir != nil {
-		params.CacheDir = *input.CacheDir
+		ID:           input.ID,
+		Name:         input.Name,
+		DriveID:      deref(input.DriveID),
+		RootFolderID: deref(input.RootFolderID),
+		KeysPath:     deref(input.KeysPath),
+		Scope:        deref(input.Scope),
+		CacheDir:     deref(input.CacheDir),
+		AuthType:     deref(input.AuthType),
+		ClientID:     deref(input.ClientID),
+		ClientSecret: deref(input.ClientSecret),
+		Token:        deref(input.Token),
+		RcloneRemote: deref(input.RcloneRemote),
 	}
 	if input.CacheBytes != nil {
 		params.CacheBytes = *input.CacheBytes

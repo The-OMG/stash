@@ -41,7 +41,7 @@ func (c *Cache) lockFor(id string) *sync.Mutex {
 // EnsureLocal returns the local path of fileID's content, downloading it first
 // if absent or stale. Concurrent calls for the same id are serialized; distinct
 // ids download in parallel.
-func (c *Cache) EnsureLocal(ctx context.Context, pool *SAPool, fileID string, size int64) (string, error) {
+func (c *Cache) EnsureLocal(ctx context.Context, pool Authenticator, fileID string, size int64) (string, error) {
 	mu := c.lockFor(fileID)
 	mu.Lock()
 	defer mu.Unlock()

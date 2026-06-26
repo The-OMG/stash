@@ -37,8 +37,38 @@ type driveSourceConfig struct {
 	RootFolderID string `json:"root_folder_id"` // optional: scope to a folder instead of the whole drive
 	KeysPath     string `json:"keys_path"`      // service-account json file or directory
 	Scope        string `json:"scope"`          // optional oauth scope (default full drive)
-	CacheDir   string `json:"cache_dir"`         // optional media cache dir (default under cache path)
-	CacheBytes int64  `json:"cache_bytes"`       // optional cache size cap (default 50 GiB)
+	CacheDir     string `json:"cache_dir"`      // optional media cache dir (default under cache path)
+	CacheBytes   int64  `json:"cache_bytes"`    // optional cache size cap (default 50 GiB)
+
+	// auth: defaults to service-account (keys_path). Alternatively OAuth, or
+	// import everything (token + ids) from an existing rclone remote.
+	AuthType     string `json:"auth_type"`     // "sa" (default) | "oauth"
+	ClientID     string `json:"client_id"`     // oauth client id (rclone default if empty)
+	ClientSecret string `json:"client_secret"` // oauth client secret
+	Token        string `json:"token"`         // oauth token JSON (rclone format)
+	RcloneRemote string `json:"rclone_remote"` // import token/ids from this rclone remote
+}
+
+// buildSourceAuth constructs the Authenticator for a source and, when importing
+// an rclone remote, fills in drive_id/root_folder_id from it if unset.
+func (s *Manager) buildSourceAuth(ctx context.Context, sc *driveSourceConfig) (drive.Authenticator, error) {
+	if sc.RcloneRemote != "" {
+		r, err := drive.ResolveRcloneRemote(sc.RcloneRemote)
+		if err != nil {
+			return nil, err
+		}
+		if sc.DriveID == "" {
+			sc.DriveID = r.TeamDrive
+		}
+		if sc.RootFolderID == "" {
+			sc.RootFolderID = r.RootFolderID
+		}
+		return r.Authenticator(ctx, sc.Scope)
+	}
+	if sc.AuthType == "oauth" || sc.Token != "" {
+		return drive.NewOAuthSourceFromRcloneToken(ctx, sc.Token, sc.ClientID, sc.ClientSecret, sc.Scope)
+	}
+	return drive.NewSAPool(sc.KeysPath, sc.Scope)
 }
 
 type driveSourcesConfig struct {
@@ -97,14 +127,19 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 	}
 
 	for _, sc := range cfg.Sources {
-		if sc.ID == "" || sc.DriveID == "" || sc.KeysPath == "" {
-			logger.Warnf("drive: skipping source with missing id/drive_id/keys_path: %+v", sc)
+		if sc.ID == "" || (sc.DriveID == "" && sc.RcloneRemote == "") {
+			logger.Warnf("drive: skipping source missing id or drive_id/rclone_remote: %+v", sc)
 			continue
 		}
 
-		pool, err := drive.NewSAPool(sc.KeysPath, sc.Scope)
+		// buildSourceAuth may fill sc.DriveID/RootFolderID from an rclone remote.
+		auth, err := s.buildSourceAuth(ctx, &sc)
 		if err != nil {
 			logger.Errorf("drive[%s]: auth: %v", sc.ID, err)
+			continue
+		}
+		if sc.DriveID == "" {
+			logger.Errorf("drive[%s]: no drive id (set drive_id or use an rclone remote with team_drive)", sc.ID)
 			continue
 		}
 
@@ -115,7 +150,7 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 			continue
 		}
 
-		source := &drive.Source{DriveID: sc.DriveID, Pool: pool, Index: index}
+		source := &drive.Source{DriveID: sc.DriveID, Pool: auth, Index: index}
 		root := filepath.Join(driveVirtualRoot, sc.ID)
 		dfs := drive.NewDriveFS(source, root)
 
@@ -138,8 +173,8 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 		s.driveSources = append(s.driveSources, &managedDriveSource{
 			cfg: sc, source: source, fs: dfs, cache: cache, root: root,
 		})
-		logger.Infof("drive[%s]: mounted shared drive %s at %s (%d service accounts, %s)",
-			sc.ID, sc.DriveID, root, pool.Len(), index.String())
+		logger.Infof("drive[%s]: mounted shared drive %s at %s (%d account(s), %s)",
+			sc.ID, sc.DriveID, root, auth.Len(), index.String())
 	}
 
 	// install the media path resolvers:
@@ -151,6 +186,60 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 	mediapath.ProbeResolver = s.resolveProbeTarget
 	mediapath.HeadReader = s.resolveHead
 	mediapath.ThumbResolver = s.resolveThumb
+
+	// route deletion of Drive-backed files to the drive's trash (reversible).
+	file.DriveTrasher = s
+}
+
+// driveSourceForPath returns the mounted source owning path and the
+// drive-relative path under it.
+func (s *Manager) driveSourceForPath(path string) (*managedDriveSource, string, bool) {
+	clean := filepath.Clean(path)
+	for _, ms := range s.driveSources {
+		if clean == ms.root || strings.HasPrefix(clean, ms.root+string(filepath.Separator)) {
+			rel := strings.TrimPrefix(strings.TrimPrefix(clean, ms.root), string(filepath.Separator))
+			return ms, rel, true
+		}
+	}
+	return nil, "", false
+}
+
+// IsManaged reports whether path belongs to a mounted Drive source.
+func (s *Manager) IsManaged(path string) bool {
+	_, _, ok := s.driveSourceForPath(path)
+	return ok
+}
+
+// Trash moves a Drive-backed file to the drive's trash (file.RemoteTrasher).
+func (s *Manager) Trash(path string) error {
+	ms, rel, ok := s.driveSourceForPath(path)
+	if !ok {
+		return fmt.Errorf("not a drive path: %s", path)
+	}
+	it, found, err := ms.source.Index.LookupPath(rel)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil // already gone
+	}
+	return ms.source.SetTrashed(context.Background(), it.ID, true)
+}
+
+// Untrash restores a previously-trashed Drive file (delete rollback).
+func (s *Manager) Untrash(path string) error {
+	ms, rel, ok := s.driveSourceForPath(path)
+	if !ok {
+		return fmt.Errorf("not a drive path: %s", path)
+	}
+	it, found, err := ms.source.Index.LookupPath(rel)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	return ms.source.SetTrashed(context.Background(), it.ID, false)
 }
 
 // resolveThumb returns Drive's own thumbnail (JPEG bytes) for a Drive-backed
@@ -284,6 +373,67 @@ type DriveSourceParams struct {
 	Scope        string
 	CacheDir     string
 	CacheBytes   int64
+	AuthType     string
+	ClientID     string
+	ClientSecret string
+	Token        string
+	RcloneRemote string
+}
+
+// DriveFolderInfo is a folder returned by the source picker.
+type DriveFolderInfo struct {
+	ID   string
+	Name string
+}
+
+// RcloneRemotes lists rclone remotes that resolve to a Drive (for the picker).
+func (s *Manager) RcloneRemotes() ([]string, error) {
+	return drive.ListRcloneDriveRemotes()
+}
+
+// BrowseDrive lists the folders directly under parentID (or the drive/source
+// root when parentID is empty) using transient auth from the given params. Used
+// by the source-picker UI to navigate without creating a source.
+func (s *Manager) BrowseDrive(ctx context.Context, in DriveSourceParams, parentID string) ([]DriveFolderInfo, error) {
+	sc := driveSourceConfig{
+		DriveID: in.DriveID, RootFolderID: in.RootFolderID, KeysPath: in.KeysPath, Scope: in.Scope,
+		AuthType: in.AuthType, ClientID: in.ClientID, ClientSecret: in.ClientSecret,
+		Token: in.Token, RcloneRemote: in.RcloneRemote,
+	}
+	auth, err := s.buildSourceAuth(ctx, &sc)
+	if err != nil {
+		return nil, err
+	}
+	if sc.DriveID == "" {
+		return nil, fmt.Errorf("no drive id resolved")
+	}
+	svc, err := auth.First(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	parent := parentID
+	if parent == "" {
+		if sc.RootFolderID != "" {
+			parent = sc.RootFolderID
+		} else {
+			parent = sc.DriveID
+		}
+	}
+
+	var folders []DriveFolderInfo
+	err = drive.ListFolder(ctx, svc, sc.DriveID, parent, func(items []drive.Item) error {
+		for _, it := range items {
+			if it.IsFolder {
+				folders = append(folders, DriveFolderInfo{ID: it.ID, Name: it.Name})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return folders, nil
 }
 
 // ListDriveSources returns the configured sources (from the sidecar) annotated
@@ -328,30 +478,40 @@ func (s *Manager) saveDriveSourcesConfig(cfg driveSourcesConfig) error {
 // AddDriveSource validates Drive access, persists the source to the sidecar
 // config (replacing any existing source with the same id), and remounts.
 func (s *Manager) AddDriveSource(ctx context.Context, in DriveSourceParams) error {
-	if in.ID == "" || in.DriveID == "" || in.KeysPath == "" {
-		return fmt.Errorf("id, drive_id and keys_path are required")
+	if in.ID == "" {
+		return fmt.Errorf("id is required")
+	}
+	if in.DriveID == "" && in.RcloneRemote == "" {
+		return fmt.Errorf("either drive_id or rclone_remote is required")
+	}
+
+	sc := driveSourceConfig{
+		ID: in.ID, Name: in.Name, DriveID: in.DriveID, RootFolderID: in.RootFolderID,
+		KeysPath: in.KeysPath, Scope: in.Scope, CacheDir: in.CacheDir, CacheBytes: in.CacheBytes,
+		AuthType: in.AuthType, ClientID: in.ClientID, ClientSecret: in.ClientSecret,
+		Token: in.Token, RcloneRemote: in.RcloneRemote,
 	}
 
 	// validate auth + drive access up front so the UI gets immediate feedback.
-	pool, err := drive.NewSAPool(in.KeysPath, in.Scope)
+	// buildSourceAuth also fills DriveID/RootFolderID from an rclone remote.
+	auth, err := s.buildSourceAuth(ctx, &sc)
 	if err != nil {
-		return fmt.Errorf("service account: %w", err)
+		return fmt.Errorf("auth: %w", err)
 	}
-	svc, err := pool.First(ctx)
+	if sc.DriveID == "" {
+		return fmt.Errorf("no drive id resolved (set drive_id or use an rclone remote with a team_drive)")
+	}
+	svc, err := auth.First(ctx)
 	if err != nil {
 		return err
 	}
-	if _, err := drive.StartPageToken(ctx, svc, in.DriveID); err != nil {
-		return fmt.Errorf("cannot access shared drive %s: %w", in.DriveID, err)
+	if _, err := drive.StartPageToken(ctx, svc, sc.DriveID); err != nil {
+		return fmt.Errorf("cannot access shared drive %s: %w", sc.DriveID, err)
 	}
 
 	cfg, err := s.loadDriveSourcesConfig()
 	if err != nil {
 		return err
-	}
-	sc := driveSourceConfig{
-		ID: in.ID, Name: in.Name, DriveID: in.DriveID, RootFolderID: in.RootFolderID,
-		KeysPath: in.KeysPath, Scope: in.Scope, CacheDir: in.CacheDir, CacheBytes: in.CacheBytes,
 	}
 	replaced := false
 	for i := range cfg.Sources {

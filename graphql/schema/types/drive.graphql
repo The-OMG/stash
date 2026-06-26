@@ -20,13 +20,44 @@ type DriveSource {
   mounted: Boolean!
 }
 
+"A Google Drive folder, for the source picker."
+type DriveFolder {
+  id: String!
+  name: String!
+}
+
+input DriveBrowseInput {
+  "drive to browse (optional if rclone_remote provides a team_drive)"
+  drive_id: String
+  "parent folder id to list; empty = the drive/source root"
+  parent_id: String
+  keys_path: String
+  scope: String
+  auth_type: String
+  client_id: String
+  client_secret: String
+  token: String
+  rclone_remote: String
+}
+
 input AddDriveSourceInput {
   id: String!
   name: String!
-  drive_id: String!
+  "shared drive id (optional if importing an rclone remote that has a team_drive)"
+  drive_id: String
   root_folder_id: String
-  keys_path: String!
+  "service-account json file or directory (for SA auth)"
+  keys_path: String
   scope: String
   cache_dir: String
   cache_bytes: Int64
+  "auth type: 'sa' (default) or 'oauth'"
+  auth_type: String
+  "oauth client id/secret (optional; rclone defaults used if empty)"
+  client_id: String
+  client_secret: String
+  "oauth token JSON (rclone format)"
+  token: String
+  "import token + ids from this rclone remote name"
+  rclone_remote: String
 }

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	gdrive "google.golang.org/api/drive/v3"
 )
 
 // downloadURLFmt is the Drive API media-download endpoint. ffprobe/ffmpeg can
@@ -73,6 +75,22 @@ func resizeThumbLink(link string, size int) string {
 	return link + "=s" + strconv.Itoa(size)
 }
 
+// SetTrashed moves a Drive file to (or restores it from) the drive's trash.
+// Drive trash is reversible, which lets it back stash's delete rollback.
+func (s *Source) SetTrashed(ctx context.Context, fileID string, trashed bool) error {
+	svc, err := s.Pool.Next(ctx)
+	if err != nil {
+		return err
+	}
+	return retryable(func() error {
+		_, e := svc.Files.Update(fileID, &gdrive.File{
+			Trashed:         trashed,
+			ForceSendFields: []string{"Trashed"},
+		}).SupportsAllDrives(true).Context(ctx).Do()
+		return e
+	})
+}
+
 // ReadHead returns up to the first n bytes of fileID via a ranged GET. Used for
 // container magic-byte detection without a full download.
 func (s *Source) ReadHead(ctx context.Context, fileID string, n int) ([]byte, error) {
@@ -98,7 +116,7 @@ func (s *Source) ReadHead(ctx context.Context, fileID string, n int) ([]byte, er
 // is the unit stash registers as a library.
 type Source struct {
 	DriveID string
-	Pool    *SAPool
+	Pool    Authenticator
 	Index   *Index
 }
 

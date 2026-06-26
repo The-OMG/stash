@@ -250,6 +250,10 @@ type Query {
   # Google Drive sources
   "Returns all configured native Google Drive sources"
   driveSources: [DriveSource!]!
+  "Returns rclone remote names that resolve to a Google Drive (for the source picker)"
+  rcloneRemotes: [String!]!
+  "Lists folders under a drive/folder for the Drive source picker"
+  driveBrowse(input: DriveBrowseInput!): [DriveFolder!]!
 
   # System status
   systemStatus: SystemStatus!
