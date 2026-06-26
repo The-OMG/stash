@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -25,7 +26,18 @@ func main() {
 	scope := flag.String("scope", "", "oauth scope (default: full drive)")
 	since := flag.String("since", "", "change page token: poll incremental changes instead of full list")
 	fstest := flag.Bool("fstest", false, "validate DriveFS ranged reads: oshash one file via head+tail vs whole-file download")
+	listDrives := flag.Bool("listdrives", false, "list shared drives the service account(s) can access")
+	probetest := flag.Bool("probetest", false, "ffprobe a large drive video via authenticated ranged URL (proves no full download)")
 	flag.Parse()
+
+	if *listDrives {
+		runListDrives(*keys, *scope)
+		return
+	}
+	if *probetest {
+		runProbeTest(*keys, *scope, *driveID)
+		return
+	}
 
 	if *driveID == "" {
 		fmt.Fprintln(os.Stderr, "usage: drivetest -drive <DRIVE_ID> [-keys <path>]")
@@ -112,6 +124,96 @@ func main() {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "error:", err)
 	os.Exit(1)
+}
+
+// runListDrives lists the shared drives accessible to the first service account.
+func runListDrives(keys, scope string) {
+	ctx := context.Background()
+	pool, err := drive.NewSAPool(keys, scope)
+	if err != nil {
+		fatal(err)
+	}
+	svc, err := pool.First(ctx)
+	if err != nil {
+		fatal(err)
+	}
+
+	var pageToken string
+	n := 0
+	for {
+		call := svc.Drives.List().PageSize(100).Fields("nextPageToken,drives(id,name)")
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+		resp, err := call.Context(ctx).Do()
+		if err != nil {
+			fatal(err)
+		}
+		for _, d := range resp.Drives {
+			n++
+			fmt.Printf("%-40s  %s\n", d.Id, d.Name)
+		}
+		if resp.NextPageToken == "" {
+			break
+		}
+		pageToken = resp.NextPageToken
+	}
+	fmt.Printf("\n%d shared drive(s) accessible to %s\n", n, keys)
+}
+
+// runProbeTest proves scan-time metadata works for Drive videos via an
+// authenticated ranged ffprobe URL — without downloading the whole file.
+func runProbeTest(keys, scope, driveID string) {
+	ctx := context.Background()
+	pool, err := drive.NewSAPool(keys, scope)
+	if err != nil {
+		fatal(err)
+	}
+	svc, err := pool.First(ctx)
+	if err != nil {
+		fatal(err)
+	}
+
+	// pick a large video so "ranged vs full download" is unambiguous.
+	resp, err := svc.Files.List().
+		DriveId(driveID).Corpora("drive").
+		IncludeItemsFromAllDrives(true).SupportsAllDrives(true).
+		Q("trashed=false and mimeType contains 'video/'").
+		OrderBy("quotaBytesUsed desc").
+		PageSize(10).
+		Fields(googleapi.Field("files(id,name,size,mimeType)")).
+		Context(ctx).Do()
+	if err != nil {
+		fatal(err)
+	}
+	if len(resp.Files) == 0 {
+		fatal(fmt.Errorf("no video files found in drive"))
+	}
+	vf := resp.Files[0]
+	fmt.Printf("test video: %q (%.2f GiB, id=%s)\n", vf.Name, float64(vf.Size)/(1<<30), vf.Id)
+
+	tok, err := pool.Token(ctx)
+	if err != nil {
+		fatal(err)
+	}
+	url := fmt.Sprintf("https://www.googleapis.com/drive/v3/files/%s?alt=media&supportsAllDrives=true", vf.Id)
+
+	args := []string{
+		"-v", "error", "-print_format", "json",
+		"-show_entries", "format=duration,bit_rate:stream=codec_type,codec_name,width,height",
+		"-headers", "Authorization: Bearer " + tok + "\r\n",
+		url,
+	}
+	t := time.Now()
+	cmd := exec.CommandContext(ctx, "ffprobe", args...)
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(t)
+	if err != nil {
+		fmt.Printf("ffprobe FAILED in %s:\n%s\n", elapsed.Round(time.Millisecond), string(out))
+		os.Exit(1)
+	}
+	fmt.Printf("ffprobe OK in %s (ranged — a full download of %.2f GiB would take far longer):\n%s\n",
+		elapsed.Round(time.Millisecond), float64(vf.Size)/(1<<30), string(out))
 }
 
 // runFSTest proves the DriveFS read path: it picks the smallest real file in

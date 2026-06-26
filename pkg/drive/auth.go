@@ -31,8 +31,9 @@ type SAPool struct {
 	files []string
 	next  uint64
 
-	mu    sync.Mutex
-	cache map[string]*drive.Service
+	mu         sync.Mutex
+	cache      map[string]*drive.Service
+	tokenCreds *google.Credentials // lazily-built creds for the first SA, for raw tokens
 }
 
 // NewSAPool builds a pool from a path that is either a single service-account
@@ -117,4 +118,33 @@ func (p *SAPool) Next(ctx context.Context) (*drive.Service, error) {
 // not rotate mid-flight, such as paginated listings and change polls.
 func (p *SAPool) First(ctx context.Context) (*drive.Service, error) {
 	return p.serviceFor(ctx, p.files[0])
+}
+
+// Token returns a valid OAuth access token for the first service account. Used
+// to build authenticated Drive download URLs that ffprobe/ffmpeg can read with
+// HTTP range requests (so metadata probing doesn't download whole files). The
+// underlying token source caches and refreshes tokens automatically.
+func (p *SAPool) Token(ctx context.Context) (string, error) {
+	p.mu.Lock()
+	if p.tokenCreds == nil {
+		data, err := os.ReadFile(p.files[0])
+		if err != nil {
+			p.mu.Unlock()
+			return "", err
+		}
+		creds, err := google.CredentialsFromJSON(ctx, data, p.scope)
+		if err != nil {
+			p.mu.Unlock()
+			return "", err
+		}
+		p.tokenCreds = creds
+	}
+	creds := p.tokenCreds
+	p.mu.Unlock()
+
+	tok, err := creds.TokenSource.Token()
+	if err != nil {
+		return "", err
+	}
+	return tok.AccessToken, nil
 }

@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
-	"github.com/stashapp/stash/pkg/file"
+	"github.com/stashapp/stash/pkg/mediapath"
 	"github.com/stashapp/stash/pkg/models"
 )
 
@@ -21,13 +21,24 @@ func (d *Decorator) Decorate(ctx context.Context, fs models.FS, f models.File) (
 	}
 
 	base := f.Base()
-	// TODO - copy to temp file if not an OsFS
-	if _, isOs := fs.(*file.OsFS); !isOs {
-		return f, fmt.Errorf("video.constructFile: only OsFS is supported")
+	// ffprobe cannot read files inside zip archives directly.
+	if base.ZipFile != nil {
+		return f, fmt.Errorf("video.constructFile: zip-contained files are not supported")
 	}
 
 	probe := d.FFProbe
-	videoFile, err := probe.NewVideoFile(base.Path)
+	// Drive-backed paths are probed via an authenticated ranged URL (only the
+	// container metadata is fetched, not the whole file); local paths are
+	// probed directly by path.
+	var videoFile *ffmpeg.VideoFile
+	var err error
+	if url, headers, ok, perr := mediapath.ProbeTarget(base.Path); perr != nil {
+		return f, fmt.Errorf("resolving probe target for %q: %w", base.Path, perr)
+	} else if ok {
+		videoFile, err = probe.NewVideoFileWithHeaders(url, headers, base.Path)
+	} else {
+		videoFile, err = probe.NewVideoFile(base.Path)
+	}
 	if err != nil {
 		return f, fmt.Errorf("running ffprobe on %q: %w", base.Path, err)
 	}

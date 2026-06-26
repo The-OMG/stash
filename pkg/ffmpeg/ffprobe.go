@@ -214,6 +214,18 @@ func NewFFProbe(path string) *FFProbe {
 
 // NewVideoFile runs ffprobe on the given path and returns a VideoFile.
 func (f *FFProbe) NewVideoFile(videoPath string) (*VideoFile, error) {
+	return f.newVideoFile(videoPath, videoPath, nil)
+}
+
+// NewVideoFileWithHeaders probes a remote input URL using the given HTTP
+// headers (e.g. an Authorization bearer token), reading via range requests so
+// only the container metadata is fetched. displayPath is recorded as the file's
+// path in the returned VideoFile.
+func (f *FFProbe) NewVideoFileWithHeaders(inputURL string, headers []string, displayPath string) (*VideoFile, error) {
+	return f.newVideoFile(inputURL, displayPath, headers)
+}
+
+func (f *FFProbe) newVideoFile(input, displayPath string, headers []string) (*VideoFile, error) {
 	args := []string{
 		"-v",
 		"quiet",
@@ -228,21 +240,26 @@ func (f *FFProbe) NewVideoFile(videoPath string) (*VideoFile, error) {
 		args = append(args, "-show_entries", "stream_side_data=rotation")
 	}
 
-	args = append(args, videoPath)
+	// HTTP headers (CRLF-separated) must precede the input.
+	if len(headers) > 0 {
+		args = append(args, "-headers", strings.Join(headers, "\r\n")+"\r\n")
+	}
+
+	args = append(args, input)
 
 	cmd := stashExec.Command(f.path, args...)
 	out, err := cmd.Output()
 
 	if err != nil {
-		return nil, fmt.Errorf("FFProbe encountered an error with <%s>.\nError JSON:\n%s\nError: %s", videoPath, string(out), err.Error())
+		return nil, fmt.Errorf("FFProbe encountered an error with <%s>.\nError JSON:\n%s\nError: %s", displayPath, string(out), err.Error())
 	}
 
 	probeJSON := &FFProbeJSON{}
 	if err := json.Unmarshal(out, probeJSON); err != nil {
-		return nil, fmt.Errorf("error unmarshalling video data for <%s>: %s", videoPath, err.Error())
+		return nil, fmt.Errorf("error unmarshalling video data for <%s>: %s", displayPath, err.Error())
 	}
 
-	return parse(videoPath, probeJSON)
+	return parse(displayPath, probeJSON)
 }
 
 // GetReadFrameCount counts the actual frames of the video file.

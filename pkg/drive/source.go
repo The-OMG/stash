@@ -1,6 +1,25 @@
 package drive
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
+
+// downloadURLFmt is the Drive API media-download endpoint. ffprobe/ffmpeg can
+// read this URL with an Authorization header and issue HTTP range requests, so
+// metadata probing only fetches the moov atom rather than the whole file.
+const downloadURLFmt = "https://www.googleapis.com/drive/v3/files/%s?alt=media&supportsAllDrives=true"
+
+// ProbeTarget returns an authenticated download URL and the HTTP headers ffprobe
+// needs to read fileID directly (ranged), without a full local download.
+func (s *Source) ProbeTarget(ctx context.Context, fileID string) (string, []string, error) {
+	tok, err := s.Pool.Token(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	url := fmt.Sprintf(downloadURLFmt, fileID)
+	return url, []string{"Authorization: Bearer " + tok}, nil
+}
 
 // Source ties a shared drive to its persistent index and credential pool. It
 // is the unit stash registers as a library.

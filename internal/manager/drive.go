@@ -141,9 +141,38 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 			sc.ID, sc.DriveID, root, pool.Len(), index.String())
 	}
 
-	// install the media path resolver so ffmpeg/playback fetch Drive files into
-	// the local cache on demand.
+	// install the media path resolvers:
+	//  - Resolver: full local cache download for content processing (playback,
+	//    transcode, sprites, previews) which need a seekable whole file.
+	//  - ProbeResolver: authenticated ranged URL for metadata probing (ffprobe
+	//    during scan), so indexing does not download whole files.
 	mediapath.Resolver = s.resolveMediaPath
+	mediapath.ProbeResolver = s.resolveProbeTarget
+}
+
+// resolveProbeTarget maps a virtual Drive path to an authenticated, ranged
+// ffprobe input URL + headers. ok is false for local paths (probe by path).
+func (s *Manager) resolveProbeTarget(path string) (string, []string, bool, error) {
+	clean := filepath.Clean(path)
+	for _, ms := range s.driveSources {
+		if clean != ms.root && !strings.HasPrefix(clean, ms.root+string(filepath.Separator)) {
+			continue
+		}
+		rel := strings.TrimPrefix(strings.TrimPrefix(clean, ms.root), string(filepath.Separator))
+		it, ok, err := ms.source.Index.LookupPath(rel)
+		if err != nil {
+			return "", nil, false, err
+		}
+		if !ok {
+			return "", nil, false, fmt.Errorf("drive[%s]: path not in index: %s", ms.cfg.ID, rel)
+		}
+		url, headers, err := ms.source.ProbeTarget(context.Background(), it.ID)
+		if err != nil {
+			return "", nil, false, err
+		}
+		return url, headers, true, nil
+	}
+	return "", nil, false, nil
 }
 
 // resolveMediaPath maps a virtual Drive path to a local cached file path,
