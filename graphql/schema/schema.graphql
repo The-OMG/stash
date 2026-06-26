@@ -247,6 +247,10 @@ type Query {
   ): Directory!
   validateStashBoxCredentials(input: StashBoxInput!): StashBoxValidationResult!
 
+  # Google Drive sources
+  "Returns all configured native Google Drive sources"
+  driveSources: [DriveSource!]!
+
   # System status
   systemStatus: SystemStatus!
 
@@ -445,6 +449,13 @@ type Mutation {
   configureDefaults(
     input: ConfigDefaultSettingsInput!
   ): ConfigDefaultSettingsResult!
+
+  "Add (or replace by id) a native Google Drive source and mount it"
+  addDriveSource(input: AddDriveSourceInput!): DriveSource!
+  "Remove a native Google Drive source by id (keeps its index/cache on disk)"
+  removeDriveSource(id: String!): Boolean!
+  "Trigger an index sync (cold full or incremental) for a Drive source in the background"
+  syncDriveSource(id: String!): Boolean!
 
   "overwrites the entire plugin configuration for the given plugin"
   configurePlugin(plugin_id: ID!, input: Map!): Map!

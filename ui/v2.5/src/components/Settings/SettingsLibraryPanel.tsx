@@ -8,6 +8,7 @@ import { useSettings } from "./context";
 import { useIntl } from "react-intl";
 import { faQuestionCircle } from "@fortawesome/free-solid-svg-icons";
 import { ExternalLink } from "../Shared/ExternalLink";
+import { DriveSourcesSection } from "./DriveSourcesSection";
 
 export const SettingsLibraryPanel: React.FC = () => {
   const intl = useIntl();
@@ -35,6 +36,8 @@ export const SettingsLibraryPanel: React.FC = () => {
         value={general.stashes ?? []}
         onChange={(v) => saveGeneral({ stashes: v })}
       />
+
+      <DriveSourcesSection />
 
       <SettingSection headingID="config.library.media_content_extensions">
         <StringSetting

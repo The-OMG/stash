@@ -1,0 +1,12 @@
+query DriveSources {
+  driveSources {
+    id
+    name
+    drive_id
+    keys_path
+    scope
+    cache_dir
+    file_count
+    mounted
+  }
+}

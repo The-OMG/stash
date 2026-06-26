@@ -1,0 +1,29 @@
+"A native Google Drive source: a shared drive scanned directly via the Drive API."
+type DriveSource {
+  "stable identifier, used in the virtual library path"
+  id: String!
+  "display name"
+  name: String!
+  "shared (team) drive id"
+  drive_id: String!
+  "service-account json file or directory"
+  keys_path: String!
+  "oauth scope (empty = full drive)"
+  scope: String
+  "media cache directory (empty = default under cache path)"
+  cache_dir: String
+  "number of files currently indexed"
+  file_count: Int!
+  "whether the source is mounted and ready"
+  mounted: Boolean!
+}
+
+input AddDriveSourceInput {
+  id: String!
+  name: String!
+  drive_id: String!
+  keys_path: String!
+  scope: String
+  cache_dir: String
+  cache_bytes: Int64
+}

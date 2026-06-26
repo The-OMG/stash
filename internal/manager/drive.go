@@ -177,6 +177,159 @@ func (s *Manager) DriveRoots() []string {
 	return roots
 }
 
+// DriveSourceStatus is the manager-level (exported) view of a configured Drive
+// source, for the GraphQL layer.
+type DriveSourceStatus struct {
+	ID        string
+	Name      string
+	DriveID   string
+	KeysPath  string
+	Scope     string
+	CacheDir  string
+	FileCount int
+	Mounted   bool
+}
+
+// DriveSourceParams is the input for adding/replacing a Drive source.
+type DriveSourceParams struct {
+	ID         string
+	Name       string
+	DriveID    string
+	KeysPath   string
+	Scope      string
+	CacheDir   string
+	CacheBytes int64
+}
+
+// ListDriveSources returns the configured sources (from the sidecar) annotated
+// with live mount/index status.
+func (s *Manager) ListDriveSources() []DriveSourceStatus {
+	cfg, err := s.loadDriveSourcesConfig()
+	if err != nil {
+		logger.Errorf("drive: list: %v", err)
+		return nil
+	}
+	mounted := make(map[string]*managedDriveSource, len(s.driveSources))
+	for _, ms := range s.driveSources {
+		mounted[ms.cfg.ID] = ms
+	}
+
+	out := make([]DriveSourceStatus, 0, len(cfg.Sources))
+	for _, sc := range cfg.Sources {
+		st := DriveSourceStatus{
+			ID: sc.ID, Name: sc.Name, DriveID: sc.DriveID,
+			KeysPath: sc.KeysPath, Scope: sc.Scope, CacheDir: sc.CacheDir,
+		}
+		if ms, ok := mounted[sc.ID]; ok {
+			st.Mounted = true
+			if n, err := ms.source.Index.Count(); err == nil {
+				st.FileCount = n
+			}
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+func (s *Manager) saveDriveSourcesConfig(cfg driveSourcesConfig) error {
+	path := filepath.Join(s.Config.GetConfigPath(), driveSourcesFile)
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// AddDriveSource validates Drive access, persists the source to the sidecar
+// config (replacing any existing source with the same id), and remounts.
+func (s *Manager) AddDriveSource(ctx context.Context, in DriveSourceParams) error {
+	if in.ID == "" || in.DriveID == "" || in.KeysPath == "" {
+		return fmt.Errorf("id, drive_id and keys_path are required")
+	}
+
+	// validate auth + drive access up front so the UI gets immediate feedback.
+	pool, err := drive.NewSAPool(in.KeysPath, in.Scope)
+	if err != nil {
+		return fmt.Errorf("service account: %w", err)
+	}
+	svc, err := pool.First(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := drive.StartPageToken(ctx, svc, in.DriveID); err != nil {
+		return fmt.Errorf("cannot access shared drive %s: %w", in.DriveID, err)
+	}
+
+	cfg, err := s.loadDriveSourcesConfig()
+	if err != nil {
+		return err
+	}
+	sc := driveSourceConfig{
+		ID: in.ID, Name: in.Name, DriveID: in.DriveID, KeysPath: in.KeysPath,
+		Scope: in.Scope, CacheDir: in.CacheDir, CacheBytes: in.CacheBytes,
+	}
+	replaced := false
+	for i := range cfg.Sources {
+		if cfg.Sources[i].ID == in.ID {
+			cfg.Sources[i] = sc
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		cfg.Sources = append(cfg.Sources, sc)
+	}
+	if err := s.saveDriveSourcesConfig(cfg); err != nil {
+		return err
+	}
+
+	s.RefreshDriveSources(ctx)
+	return nil
+}
+
+// RemoveDriveSource removes a source from the sidecar config and unmounts it.
+// The on-disk index and cache are left in place.
+func (s *Manager) RemoveDriveSource(ctx context.Context, id string) error {
+	cfg, err := s.loadDriveSourcesConfig()
+	if err != nil {
+		return err
+	}
+	kept := make([]driveSourceConfig, 0, len(cfg.Sources))
+	found := false
+	for _, sc := range cfg.Sources {
+		if sc.ID == id {
+			found = true
+			continue
+		}
+		kept = append(kept, sc)
+	}
+	if !found {
+		return fmt.Errorf("no drive source with id %q", id)
+	}
+	cfg.Sources = kept
+	if err := s.saveDriveSourcesConfig(cfg); err != nil {
+		return err
+	}
+
+	s.RefreshDriveSources(ctx)
+	return nil
+}
+
+// SyncDriveSourceByID triggers a background index sync for one mounted source.
+func (s *Manager) SyncDriveSourceByID(id string) error {
+	for _, ms := range s.driveSources {
+		if ms.cfg.ID == id {
+			go func(m *managedDriveSource) {
+				if _, err := m.source.Sync(context.Background()); err != nil {
+					logger.Errorf("drive[%s]: background sync: %v", m.cfg.ID, err)
+				}
+			}(ms)
+			return nil
+		}
+	}
+	return fmt.Errorf("no mounted drive source with id %q", id)
+}
+
 // SyncDriveSources refreshes each Drive index from the Drive API: a cold full
 // list on first run, then fast incremental Changes-API polls. Called before a
 // scan so the dispatcher's view of each drive is current.
