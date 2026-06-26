@@ -16,10 +16,11 @@ import (
 // folderMime is the Drive MIME type for folders.
 const folderMime = "application/vnd.google-apps.folder"
 
-// fileFields is the minimal set of fields requested per file. Keeping this
-// small keeps listings fast and cheap. md5Checksum comes free from metadata,
-// avoiding any file read for hashing fallback.
-const fileFields = "id,name,size,mimeType,modifiedTime,md5Checksum,parents,trashed"
+// fileFields is the set of fields requested per file. md5Checksum, the media
+// metadata (dimensions/duration) and hasThumbnail all come free from Drive's
+// metadata — letting us skip reads/ffprobe and serve native thumbnails.
+const fileFields = "id,name,size,mimeType,modifiedTime,md5Checksum,parents,trashed,hasThumbnail," +
+	"videoMediaMetadata(width,height,durationMillis),imageMediaMetadata(width,height)"
 
 // Item is a flattened Drive file/folder record as stored in the index.
 type Item struct {
@@ -32,6 +33,12 @@ type Item struct {
 	MD5      string
 	IsFolder bool
 	Trashed  bool
+
+	// native Drive metadata (0/false when Drive hasn't processed the file)
+	Width        int64
+	Height       int64
+	DurationMS   int64
+	HasThumbnail bool
 }
 
 func itemFromFile(f *drive.File) Item {
@@ -40,17 +47,27 @@ func itemFromFile(f *drive.File) Item {
 		parent = f.Parents[0]
 	}
 	mt, _ := time.Parse(time.RFC3339, f.ModifiedTime)
-	return Item{
-		ID:       f.Id,
-		Name:     f.Name,
-		Parent:   parent,
-		Size:     f.Size,
-		MimeType: f.MimeType,
-		ModTime:  mt,
-		MD5:      f.Md5Checksum,
-		IsFolder: f.MimeType == folderMime,
-		Trashed:  f.Trashed,
+	it := Item{
+		ID:           f.Id,
+		Name:         f.Name,
+		Parent:       parent,
+		Size:         f.Size,
+		MimeType:     f.MimeType,
+		ModTime:      mt,
+		MD5:          f.Md5Checksum,
+		IsFolder:     f.MimeType == folderMime,
+		Trashed:      f.Trashed,
+		HasThumbnail: f.HasThumbnail,
 	}
+	if f.VideoMediaMetadata != nil {
+		it.Width = f.VideoMediaMetadata.Width
+		it.Height = f.VideoMediaMetadata.Height
+		it.DurationMS = f.VideoMediaMetadata.DurationMillis
+	} else if f.ImageMediaMetadata != nil {
+		it.Width = f.ImageMediaMetadata.Width
+		it.Height = f.ImageMediaMetadata.Height
+	}
+	return it
 }
 
 // retryable wraps a Drive API call with exponential backoff on rate-limit
@@ -118,6 +135,22 @@ func ListDrive(ctx context.Context, svc *drive.Service, driveID string, cb func(
 		}
 		pageToken = resp.NextPageToken
 	}
+}
+
+// ThumbnailURL fetches a fresh (short-lived) thumbnail link for a file. Drive
+// generates thumbnails for images and most videos; the link must be fetched on
+// demand because it expires.
+func ThumbnailURL(ctx context.Context, svc *drive.Service, fileID string) (string, error) {
+	var f *drive.File
+	err := retryable(func() error {
+		var e error
+		f, e = svc.Files.Get(fileID).SupportsAllDrives(true).Fields("thumbnailLink").Context(ctx).Do()
+		return e
+	})
+	if err != nil {
+		return "", err
+	}
+	return f.ThumbnailLink, nil
 }
 
 // OpenRange opens a read stream for a file's content starting at offset

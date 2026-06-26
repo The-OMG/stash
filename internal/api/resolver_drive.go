@@ -15,6 +15,10 @@ func driveSourceToGQL(st manager.DriveSourceStatus) *DriveSource {
 		FileCount: st.FileCount,
 		Mounted:   st.Mounted,
 	}
+	if st.RootFolderID != "" {
+		r := st.RootFolderID
+		ds.RootFolderID = &r
+	}
 	if st.Scope != "" {
 		s := st.Scope
 		ds.Scope = &s
@@ -41,6 +45,9 @@ func (r *mutationResolver) AddDriveSource(ctx context.Context, input AddDriveSou
 		Name:     input.Name,
 		DriveID:  input.DriveID,
 		KeysPath: input.KeysPath,
+	}
+	if input.RootFolderID != nil {
+		params.RootFolderID = *input.RootFolderID
 	}
 	if input.Scope != nil {
 		params.Scope = *input.Scope

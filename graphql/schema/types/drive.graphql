@@ -6,6 +6,8 @@ type DriveSource {
   name: String!
   "shared (team) drive id"
   drive_id: String!
+  "optional folder id to scope the source to (empty = whole drive)"
+  root_folder_id: String
   "service-account json file or directory"
   keys_path: String!
   "oauth scope (empty = full drive)"
@@ -22,6 +24,7 @@ input AddDriveSourceInput {
   id: String!
   name: String!
   drive_id: String!
+  root_folder_id: String
   keys_path: String!
   scope: String
   cache_dir: String

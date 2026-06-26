@@ -47,3 +47,18 @@ func ReadHead(path string, n int) (data []byte, ok bool, err error) {
 	}
 	return HeadReader(path, n)
 }
+
+// ThumbResolver, if set, returns a native thumbnail image (JPEG bytes) for a
+// media path, optionally resized to `size` px. ok is false when no native
+// thumbnail is available (caller should generate one itself). Lets covers and
+// image thumbnails come straight from Drive without downloading the full file.
+var ThumbResolver func(path string, size int) (data []byte, ok bool, err error)
+
+// ThumbData returns a native thumbnail for path. ok is false when the caller
+// should fall back to generating the thumbnail.
+func ThumbData(path string, size int) (data []byte, ok bool, err error) {
+	if ThumbResolver == nil {
+		return nil, false, nil
+	}
+	return ThumbResolver(path, size)
+}

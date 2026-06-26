@@ -28,7 +28,13 @@ func main() {
 	fstest := flag.Bool("fstest", false, "validate DriveFS ranged reads: oshash one file via head+tail vs whole-file download")
 	listDrives := flag.Bool("listdrives", false, "list shared drives the service account(s) can access")
 	probetest := flag.Bool("probetest", false, "ffprobe a large drive video via authenticated ranged URL (proves no full download)")
+	meta := flag.Bool("meta", false, "show what Drive exposes natively (md5, videoMediaMetadata, thumbnailLink) for sample files")
 	flag.Parse()
+
+	if *meta {
+		runMeta(*keys, *scope, *driveID)
+		return
+	}
 
 	if *listDrives {
 		runListDrives(*keys, *scope)
@@ -161,6 +167,60 @@ func runListDrives(keys, scope string) {
 	fmt.Printf("\n%d shared drive(s) accessible to %s\n", n, keys)
 }
 
+// runMeta reports which native Drive-provided fields are populated for sample
+// files (so we know what we can use without downloading or ffprobe).
+func runMeta(keys, scope, driveID string) {
+	ctx := context.Background()
+	pool, err := drive.NewSAPool(keys, scope)
+	if err != nil {
+		fatal(err)
+	}
+	svc, err := pool.First(ctx)
+	if err != nil {
+		fatal(err)
+	}
+
+	check := func(label, q string) {
+		fmt.Printf("\n=== %s ===\n", label)
+		resp, err := svc.Files.List().
+			DriveId(driveID).Corpora("drive").
+			IncludeItemsFromAllDrives(true).SupportsAllDrives(true).
+			Q(q).OrderBy("quotaBytesUsed desc").PageSize(5).
+			Fields("files(name,mimeType,size,md5Checksum,thumbnailLink,videoMediaMetadata,imageMediaMetadata)").
+			Context(ctx).Do()
+		if err != nil {
+			fmt.Println("  error:", err)
+			return
+		}
+		for _, f := range resp.Files {
+			md5 := "no"
+			if f.Md5Checksum != "" {
+				md5 = "yes"
+			}
+			thumb := "no"
+			if f.ThumbnailLink != "" {
+				thumb = "yes"
+			}
+			vmm := "none"
+			if f.VideoMediaMetadata != nil {
+				vmm = fmt.Sprintf("%dx%d %dms", f.VideoMediaMetadata.Width, f.VideoMediaMetadata.Height, f.VideoMediaMetadata.DurationMillis)
+			}
+			imm := "none"
+			if f.ImageMediaMetadata != nil {
+				imm = fmt.Sprintf("%dx%d", f.ImageMediaMetadata.Width, f.ImageMediaMetadata.Height)
+			}
+			name := f.Name
+			if len(name) > 42 {
+				name = name[:42]
+			}
+			fmt.Printf("  %-44s md5=%s thumb=%s video=%s image=%s\n", name, md5, thumb, vmm, imm)
+		}
+	}
+
+	check("VIDEOS", "trashed=false and mimeType contains 'video/'")
+	check("IMAGES", "trashed=false and (mimeType='image/jpeg' or mimeType='image/png')")
+}
+
 // runProbeTest proves scan-time metadata works for Drive videos via an
 // authenticated ranged ffprobe URL — without downloading the whole file.
 func runProbeTest(keys, scope, driveID string) {
@@ -261,7 +321,7 @@ func runFSTest(ctx context.Context, pool *drive.SAPool, svc *gdrive.Service, dri
 	}
 	defer os.RemoveAll(tmp)
 
-	index, err := drive.OpenIndex(filepath.Join(tmp, "idx.sqlite"), driveID)
+	index, err := drive.OpenIndex(filepath.Join(tmp, "idx.sqlite"), driveID, "")
 	if err != nil {
 		fatal(err)
 	}

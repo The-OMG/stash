@@ -17,6 +17,7 @@ import (
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/image"
 	"github.com/stashapp/stash/pkg/logger"
+	"github.com/stashapp/stash/pkg/mediapath"
 	"github.com/stashapp/stash/pkg/models"
 	"github.com/stashapp/stash/pkg/utils"
 )
@@ -69,6 +70,20 @@ func (rs imageRoutes) serveThumbnail(w http.ResponseWriter, r *http.Request, img
 		f := img.Files.Primary()
 		if f == nil {
 			rs.serveImage(w, r, img, useDefault)
+			return
+		}
+
+		// Drive-backed images: serve Drive's own thumbnail (no full download).
+		if data, ok, terr := mediapath.ThumbData(f.Base().Path, models.DefaultGthumbWidth); terr == nil && ok {
+			if manager.GetInstance().Config.IsWriteImageThumbnails() {
+				if werr := fsutil.WriteFile(filepath, data); werr == nil {
+					utils.ServeStaticFile(w, r, filepath)
+					return
+				}
+			}
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Write(data)
 			return
 		}
 

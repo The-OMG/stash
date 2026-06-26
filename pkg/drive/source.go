@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"strconv"
+	"strings"
 )
 
 // downloadURLFmt is the Drive API media-download endpoint. ffprobe/ffmpeg can
@@ -20,6 +23,54 @@ func (s *Source) ProbeTarget(ctx context.Context, fileID string) (string, []stri
 	}
 	url := fmt.Sprintf(downloadURLFmt, fileID)
 	return url, []string{"Authorization: Bearer " + tok}, nil
+}
+
+// ThumbnailData downloads Drive's own thumbnail for a file (a small JPEG),
+// optionally resized, so covers and image thumbnails don't require downloading
+// the full file or running ffmpeg/vips.
+func (s *Source) ThumbnailData(ctx context.Context, fileID string, size int) ([]byte, error) {
+	svc, err := s.Pool.Next(ctx)
+	if err != nil {
+		return nil, err
+	}
+	link, err := ThumbnailURL(ctx, svc, fileID)
+	if err != nil {
+		return nil, err
+	}
+	if link == "" {
+		return nil, fmt.Errorf("no thumbnail available for %s", fileID)
+	}
+	if size > 0 {
+		link = resizeThumbLink(link, size)
+	}
+
+	tok, err := s.Pool.Token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("thumbnail fetch for %s: %s", fileID, resp.Status)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// resizeThumbLink adjusts the "=sNNN" size suffix on a Drive thumbnail link.
+func resizeThumbLink(link string, size int) string {
+	if i := strings.LastIndex(link, "=s"); i != -1 {
+		return link[:i] + "=s" + strconv.Itoa(size)
+	}
+	return link + "=s" + strconv.Itoa(size)
 }
 
 // ReadHead returns up to the first n bytes of fileID via a ranged GET. Used for

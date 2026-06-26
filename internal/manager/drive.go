@@ -31,11 +31,12 @@ const driveSourcesFile = "gdrive_sources.json"
 
 // driveSourceConfig is one configured Google Drive source.
 type driveSourceConfig struct {
-	ID       string `json:"id"`        // stable identifier; used in the virtual path
-	Name     string `json:"name"`      // display name
-	DriveID  string `json:"drive_id"`  // shared (team) drive id
-	KeysPath string `json:"keys_path"` // service-account json file or directory
-	Scope    string `json:"scope"`     // optional oauth scope (default full drive)
+	ID           string `json:"id"`             // stable identifier; used in the virtual path
+	Name         string `json:"name"`           // display name
+	DriveID      string `json:"drive_id"`       // shared (team) drive id
+	RootFolderID string `json:"root_folder_id"` // optional: scope to a folder instead of the whole drive
+	KeysPath     string `json:"keys_path"`      // service-account json file or directory
+	Scope        string `json:"scope"`          // optional oauth scope (default full drive)
 	CacheDir   string `json:"cache_dir"`         // optional media cache dir (default under cache path)
 	CacheBytes int64  `json:"cache_bytes"`       // optional cache size cap (default 50 GiB)
 }
@@ -108,7 +109,7 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 		}
 
 		idxPath := filepath.Join(indexDir, sc.ID+".sqlite")
-		index, err := drive.OpenIndex(idxPath, sc.DriveID)
+		index, err := drive.OpenIndex(idxPath, sc.DriveID, sc.RootFolderID)
 		if err != nil {
 			logger.Errorf("drive[%s]: open index: %v", sc.ID, err)
 			continue
@@ -149,6 +150,33 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 	mediapath.Resolver = s.resolveMediaPath
 	mediapath.ProbeResolver = s.resolveProbeTarget
 	mediapath.HeadReader = s.resolveHead
+	mediapath.ThumbResolver = s.resolveThumb
+}
+
+// resolveThumb returns Drive's own thumbnail (JPEG bytes) for a Drive-backed
+// path, so covers/image thumbnails skip the full download + ffmpeg/vips. ok is
+// false for local paths or when Drive has no thumbnail (caller generates one).
+func (s *Manager) resolveThumb(path string, size int) ([]byte, bool, error) {
+	clean := filepath.Clean(path)
+	for _, ms := range s.driveSources {
+		if clean != ms.root && !strings.HasPrefix(clean, ms.root+string(filepath.Separator)) {
+			continue
+		}
+		rel := strings.TrimPrefix(strings.TrimPrefix(clean, ms.root), string(filepath.Separator))
+		it, ok, err := ms.source.Index.LookupPath(rel)
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok || !it.HasThumbnail {
+			return nil, false, nil // no native thumbnail -> caller falls back
+		}
+		data, err := ms.source.ThumbnailData(context.Background(), it.ID, size)
+		if err != nil {
+			return nil, false, err
+		}
+		return data, true, nil
+	}
+	return nil, false, nil
 }
 
 // resolveHead returns the first n bytes of a Drive-backed path via a ranged GET
@@ -235,25 +263,27 @@ func (s *Manager) DriveRoots() []string {
 // DriveSourceStatus is the manager-level (exported) view of a configured Drive
 // source, for the GraphQL layer.
 type DriveSourceStatus struct {
-	ID        string
-	Name      string
-	DriveID   string
-	KeysPath  string
-	Scope     string
-	CacheDir  string
-	FileCount int
-	Mounted   bool
+	ID           string
+	Name         string
+	DriveID      string
+	RootFolderID string
+	KeysPath     string
+	Scope        string
+	CacheDir     string
+	FileCount    int
+	Mounted      bool
 }
 
 // DriveSourceParams is the input for adding/replacing a Drive source.
 type DriveSourceParams struct {
-	ID         string
-	Name       string
-	DriveID    string
-	KeysPath   string
-	Scope      string
-	CacheDir   string
-	CacheBytes int64
+	ID           string
+	Name         string
+	DriveID      string
+	RootFolderID string
+	KeysPath     string
+	Scope        string
+	CacheDir     string
+	CacheBytes   int64
 }
 
 // ListDriveSources returns the configured sources (from the sidecar) annotated
@@ -272,7 +302,7 @@ func (s *Manager) ListDriveSources() []DriveSourceStatus {
 	out := make([]DriveSourceStatus, 0, len(cfg.Sources))
 	for _, sc := range cfg.Sources {
 		st := DriveSourceStatus{
-			ID: sc.ID, Name: sc.Name, DriveID: sc.DriveID,
+			ID: sc.ID, Name: sc.Name, DriveID: sc.DriveID, RootFolderID: sc.RootFolderID,
 			KeysPath: sc.KeysPath, Scope: sc.Scope, CacheDir: sc.CacheDir,
 		}
 		if ms, ok := mounted[sc.ID]; ok {
@@ -320,8 +350,8 @@ func (s *Manager) AddDriveSource(ctx context.Context, in DriveSourceParams) erro
 		return err
 	}
 	sc := driveSourceConfig{
-		ID: in.ID, Name: in.Name, DriveID: in.DriveID, KeysPath: in.KeysPath,
-		Scope: in.Scope, CacheDir: in.CacheDir, CacheBytes: in.CacheBytes,
+		ID: in.ID, Name: in.Name, DriveID: in.DriveID, RootFolderID: in.RootFolderID,
+		KeysPath: in.KeysPath, Scope: in.Scope, CacheDir: in.CacheDir, CacheBytes: in.CacheBytes,
 	}
 	replaced := false
 	for i := range cfg.Sources {

@@ -16,19 +16,24 @@ import (
 type Index struct {
 	db      *sqlx.DB
 	driveID string
+	rootID  string // tree root: the scoped folder id, or the drive id for a whole-drive source
 }
 
 const indexSchema = `
 CREATE TABLE IF NOT EXISTS items (
-    id        TEXT PRIMARY KEY,
-    name      TEXT NOT NULL,
-    parent    TEXT NOT NULL,
-    size      INTEGER NOT NULL,
-    mime      TEXT NOT NULL,
-    modtime   INTEGER NOT NULL,
-    md5       TEXT NOT NULL,
-    is_folder INTEGER NOT NULL,
-    trashed   INTEGER NOT NULL
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    parent      TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    mime        TEXT NOT NULL,
+    modtime     INTEGER NOT NULL,
+    md5         TEXT NOT NULL,
+    is_folder   INTEGER NOT NULL,
+    trashed     INTEGER NOT NULL,
+    width       INTEGER NOT NULL DEFAULT 0,
+    height      INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    has_thumb   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_items_parent ON items(parent);
 CREATE INDEX IF NOT EXISTS idx_items_parent_name ON items(parent, name);
@@ -42,8 +47,9 @@ CREATE TABLE IF NOT EXISTS listed_folders (
 `
 
 // OpenIndex opens (creating if needed) the index database at dbPath for the
-// given shared drive. driveID is also treated as the root folder id.
-func OpenIndex(dbPath, driveID string) (*Index, error) {
+// given shared drive. rootID is the tree root the source is scoped to (a folder
+// id); pass "" to scope to the whole drive (driveID).
+func OpenIndex(dbPath, driveID, rootID string) (*Index, error) {
 	db, err := sqlx.Connect("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, err
@@ -52,7 +58,19 @@ func OpenIndex(dbPath, driveID string) (*Index, error) {
 		db.Close()
 		return nil, err
 	}
-	idx := &Index{db: db, driveID: driveID}
+	// Idempotently add columns for indexes created by older versions.
+	for _, col := range []string{
+		"ALTER TABLE items ADD COLUMN width INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE items ADD COLUMN height INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE items ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE items ADD COLUMN has_thumb INTEGER NOT NULL DEFAULT 0",
+	} {
+		db.Exec(col) // ignore "duplicate column" on existing indexes
+	}
+	if rootID == "" {
+		rootID = driveID
+	}
+	idx := &Index{db: db, driveID: driveID, rootID: rootID}
 	if err := idx.SetMeta("drive_id", driveID); err != nil {
 		db.Close()
 		return nil, err
@@ -64,15 +82,19 @@ func (i *Index) Close() error { return i.db.Close() }
 
 // dbItem is the on-disk row form of an Item.
 type dbItem struct {
-	ID       string `db:"id"`
-	Name     string `db:"name"`
-	Parent   string `db:"parent"`
-	Size     int64  `db:"size"`
-	Mime     string `db:"mime"`
-	ModTime  int64  `db:"modtime"`
-	MD5      string `db:"md5"`
-	IsFolder bool   `db:"is_folder"`
-	Trashed  bool   `db:"trashed"`
+	ID         string `db:"id"`
+	Name       string `db:"name"`
+	Parent     string `db:"parent"`
+	Size       int64  `db:"size"`
+	Mime       string `db:"mime"`
+	ModTime    int64  `db:"modtime"`
+	MD5        string `db:"md5"`
+	IsFolder   bool   `db:"is_folder"`
+	Trashed    bool   `db:"trashed"`
+	Width      int64  `db:"width"`
+	Height     int64  `db:"height"`
+	DurationMS int64  `db:"duration_ms"`
+	HasThumb   bool   `db:"has_thumb"`
 }
 
 func toDB(it Item) dbItem {
@@ -80,6 +102,7 @@ func toDB(it Item) dbItem {
 		ID: it.ID, Name: it.Name, Parent: it.Parent, Size: it.Size,
 		Mime: it.MimeType, ModTime: it.ModTime.Unix(), MD5: it.MD5,
 		IsFolder: it.IsFolder, Trashed: it.Trashed,
+		Width: it.Width, Height: it.Height, DurationMS: it.DurationMS, HasThumb: it.HasThumbnail,
 	}
 }
 
@@ -88,6 +111,7 @@ func fromDB(d dbItem) Item {
 		ID: d.ID, Name: d.Name, Parent: d.Parent, Size: d.Size,
 		MimeType: d.Mime, ModTime: time.Unix(d.ModTime, 0), MD5: d.MD5,
 		IsFolder: d.IsFolder, Trashed: d.Trashed,
+		Width: d.Width, Height: d.Height, DurationMS: d.DurationMS, HasThumbnail: d.HasThumb,
 	}
 }
 
@@ -99,12 +123,14 @@ func (i *Index) Upsert(items []Item) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	const q = `INSERT INTO items (id,name,parent,size,mime,modtime,md5,is_folder,trashed)
-		VALUES (:id,:name,:parent,:size,:mime,:modtime,:md5,:is_folder,:trashed)
+	const q = `INSERT INTO items (id,name,parent,size,mime,modtime,md5,is_folder,trashed,width,height,duration_ms,has_thumb)
+		VALUES (:id,:name,:parent,:size,:mime,:modtime,:md5,:is_folder,:trashed,:width,:height,:duration_ms,:has_thumb)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, parent=excluded.parent, size=excluded.size,
 			mime=excluded.mime, modtime=excluded.modtime, md5=excluded.md5,
-			is_folder=excluded.is_folder, trashed=excluded.trashed`
+			is_folder=excluded.is_folder, trashed=excluded.trashed,
+			width=excluded.width, height=excluded.height,
+			duration_ms=excluded.duration_ms, has_thumb=excluded.has_thumb`
 	for _, it := range items {
 		if _, err := tx.NamedExec(q, toDB(it)); err != nil {
 			return err
@@ -169,7 +195,7 @@ func (i *Index) childByName(parentID, name string) (Item, bool, error) {
 // an item by walking name segments. An empty path returns the synthetic root.
 func (i *Index) LookupPath(p string) (Item, bool, error) {
 	p = strings.Trim(path.Clean("/"+p), "/")
-	cur := Item{ID: i.driveID, Name: "", IsFolder: true}
+	cur := Item{ID: i.rootID, Name: "", IsFolder: true}
 	if p == "" {
 		return cur, true, nil
 	}
@@ -191,7 +217,7 @@ func (i *Index) LookupPath(p string) (Item, bool, error) {
 func (i *Index) ResolvePath(id string) (string, error) {
 	var segs []string
 	cur := id
-	for cur != "" && cur != i.driveID {
+	for cur != "" && cur != i.rootID {
 		it, ok, err := i.Get(cur)
 		if err != nil {
 			return "", err

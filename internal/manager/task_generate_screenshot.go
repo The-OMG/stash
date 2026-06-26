@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/stashapp/stash/pkg/logger"
+	"github.com/stashapp/stash/pkg/mediapath"
 	"github.com/stashapp/stash/pkg/models"
 	"github.com/stashapp/stash/pkg/scene/generate"
 )
@@ -64,13 +65,22 @@ func (t *GenerateCoverTask) Start(ctx context.Context) {
 		Overwrite:    true,
 	}
 
-	coverImageData, err := g.Screenshot(context.TODO(), videoFile.Path, videoFile.Width, videoFile.Duration, generate.ScreenshotOptions{
-		At: &at,
-	})
-	if err != nil {
-		logger.Errorf("Error generating screenshot: %v", err)
-		logErrorOutput(err)
-		return
+	// For Drive-backed scenes with a native thumbnail, use Drive's own thumbnail
+	// as the cover (no full download or ffmpeg). Otherwise generate it.
+	var coverImageData []byte
+	var err error
+	if data, ok, terr := mediapath.ThumbData(videoFile.Path, 1280); terr == nil && ok {
+		logger.Debugf("Using Drive thumbnail as cover for %s", scenePath)
+		coverImageData = data
+	} else {
+		coverImageData, err = g.Screenshot(context.TODO(), videoFile.Path, videoFile.Width, videoFile.Duration, generate.ScreenshotOptions{
+			At: &at,
+		})
+		if err != nil {
+			logger.Errorf("Error generating screenshot: %v", err)
+			logErrorOutput(err)
+			return
+		}
 	}
 
 	if err := r.WithTxn(ctx, func(ctx context.Context) error {
