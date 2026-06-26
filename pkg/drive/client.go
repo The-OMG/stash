@@ -140,6 +140,49 @@ func OpenRange(ctx context.Context, svc *drive.Service, fileID string, offset in
 	return resp.Body, nil
 }
 
+// ListFolder enumerates the direct children of folderID, invoking cb per page.
+// Used for lazy, walk-driven indexing so scenes are created as the scan
+// descends rather than after a full pre-enumeration.
+func ListFolder(ctx context.Context, svc *drive.Service, driveID, folderID string, cb func([]Item) error) error {
+	q := fmt.Sprintf("'%s' in parents and trashed=false", folderID)
+	pageToken := ""
+	for {
+		var resp *drive.FileList
+		err := retryable(func() error {
+			call := svc.Files.List().
+				DriveId(driveID).
+				Corpora("drive").
+				IncludeItemsFromAllDrives(true).
+				SupportsAllDrives(true).
+				Q(q).
+				PageSize(1000).
+				Fields(googleapi.Field("nextPageToken,files(" + fileFields + ")"))
+			if pageToken != "" {
+				call = call.PageToken(pageToken)
+			}
+			var e error
+			resp, e = call.Context(ctx).Do()
+			return e
+		})
+		if err != nil {
+			return err
+		}
+
+		batch := make([]Item, 0, len(resp.Files))
+		for _, f := range resp.Files {
+			batch = append(batch, itemFromFile(f))
+		}
+		if err := cb(batch); err != nil {
+			return err
+		}
+
+		if resp.NextPageToken == "" {
+			return nil
+		}
+		pageToken = resp.NextPageToken
+	}
+}
+
 // StartPageToken returns the current change token for a shared drive. Persist
 // this after a full index; subsequent scans poll changes from it.
 func StartPageToken(ctx context.Context, svc *drive.Service, driveID string) (string, error) {

@@ -148,6 +148,32 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 	//    during scan), so indexing does not download whole files.
 	mediapath.Resolver = s.resolveMediaPath
 	mediapath.ProbeResolver = s.resolveProbeTarget
+	mediapath.HeadReader = s.resolveHead
+}
+
+// resolveHead returns the first n bytes of a Drive-backed path via a ranged GET
+// (for container magic-byte detection). ok is false for local paths.
+func (s *Manager) resolveHead(path string, n int) ([]byte, bool, error) {
+	clean := filepath.Clean(path)
+	for _, ms := range s.driveSources {
+		if clean != ms.root && !strings.HasPrefix(clean, ms.root+string(filepath.Separator)) {
+			continue
+		}
+		rel := strings.TrimPrefix(strings.TrimPrefix(clean, ms.root), string(filepath.Separator))
+		it, ok, err := ms.source.Index.LookupPath(rel)
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			return nil, false, fmt.Errorf("drive[%s]: path not in index: %s", ms.cfg.ID, rel)
+		}
+		data, err := ms.source.ReadHead(context.Background(), it.ID, n)
+		if err != nil {
+			return nil, false, err
+		}
+		return data, true, nil
+	}
+	return nil, false, nil
 }
 
 // resolveProbeTarget maps a virtual Drive path to an authenticated, ranged

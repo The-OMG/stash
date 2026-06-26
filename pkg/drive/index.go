@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS listed_folders (
+    id TEXT PRIMARY KEY
+);
 `
 
 // OpenIndex opens (creating if needed) the index database at dbPath for the
@@ -201,6 +204,20 @@ func (i *Index) ResolvePath(id string) (string, error) {
 		cur = it.Parent
 	}
 	return strings.Join(segs, "/"), nil
+}
+
+// IsListed reports whether a folder's children have already been fetched from
+// the Drive API (so lazy listing skips a re-fetch).
+func (i *Index) IsListed(folderID string) (bool, error) {
+	var n int
+	err := i.db.Get(&n, `SELECT COUNT(*) FROM listed_folders WHERE id = ?`, folderID)
+	return n > 0, err
+}
+
+// MarkListed records that a folder's children have been fetched and indexed.
+func (i *Index) MarkListed(folderID string) error {
+	_, err := i.db.Exec(`INSERT OR IGNORE INTO listed_folders (id) VALUES (?)`, folderID)
+	return err
 }
 
 // SetMeta stores a metadata key (e.g. the change page token).

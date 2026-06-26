@@ -3,6 +3,8 @@ package ffmpeg
 import (
 	"bytes"
 	"os"
+
+	"github.com/stashapp/stash/pkg/mediapath"
 )
 
 // detect file format from magic file number
@@ -41,17 +43,25 @@ func containsMatroskaSignature(buf, subType []byte) bool {
 // webm only, as ffprobe can't distinguish between them and not all
 // browsers support mkv
 func magicContainer(filePath string) (Container, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
+	var buf []byte
 
-	defer file.Close()
-
-	buf := make([]byte, 4096)
-	_, err = file.Read(buf)
-	if err != nil {
+	// For Drive-backed paths, fetch the first bytes via a ranged read instead of
+	// opening a local file.
+	if data, ok, err := mediapath.ReadHead(filePath, 4096); err != nil {
 		return "", err
+	} else if ok {
+		buf = data
+	} else {
+		file, err := os.Open(filePath)
+		if err != nil {
+			return "", err
+		}
+		defer file.Close()
+
+		buf = make([]byte, 4096)
+		if _, err = file.Read(buf); err != nil {
+			return "", err
+		}
 	}
 
 	if webm(buf) {

@@ -302,13 +302,13 @@ func parse(filePath string, probeJSON *FFProbeJSON) (*VideoFile, error) {
 	result.Container = probeJSON.Format.FormatName
 	duration, _ := strconv.ParseFloat(probeJSON.Format.Duration, 64)
 	result.FileDuration = math.Round(duration*100) / 100
-	fileStat, err := os.Stat(filePath)
-	if err != nil {
-		statErr := fmt.Errorf("error statting file <%s>: %w", filePath, err)
-		logger.Errorf("%v", statErr)
-		return nil, statErr
+	// Prefer the size reported by ffprobe (works for remote/ranged inputs whose
+	// path is not a local file). Override with the real on-disk size when the
+	// path is a local file.
+	result.Size, _ = strconv.ParseInt(probeJSON.Format.Size, 10, 64)
+	if fileStat, err := os.Stat(filePath); err == nil {
+		result.Size = fileStat.Size()
 	}
-	result.Size = fileStat.Size()
 	result.StartTime, _ = strconv.ParseFloat(probeJSON.Format.StartTime, 64)
 	result.CreationTime = probeJSON.Format.Tags.CreationTime.Time
 
@@ -353,8 +353,9 @@ func parse(filePath string, probeJSON *FFProbeJSON) (*VideoFile, error) {
 			result.Height = videoStream.Width
 		}
 
-		result.VideoStreamDuration, err = strconv.ParseFloat(videoStream.Duration, 64)
-		if err != nil {
+		var derr error
+		result.VideoStreamDuration, derr = strconv.ParseFloat(videoStream.Duration, 64)
+		if derr != nil {
 			// Revert to the historical behaviour, which is still correct in the vast majority of cases.
 			result.VideoStreamDuration = result.FileDuration
 		}

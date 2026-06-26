@@ -33,3 +33,17 @@ func ProbeTarget(path string) (url string, headers []string, ok bool, err error)
 	}
 	return ProbeResolver(path)
 }
+
+// HeadReader, if set, returns the first n bytes of a media path. ok is false for
+// local/unmanaged paths (read them directly). Used for cheap container magic-byte
+// detection on remote files without a full download.
+var HeadReader func(path string, n int) (data []byte, ok bool, err error)
+
+// ReadHead returns the first n bytes of path via the installed reader. ok is
+// false when the path should be read directly from disk.
+func ReadHead(path string, n int) (data []byte, ok bool, err error) {
+	if HeadReader == nil {
+		return nil, false, nil
+	}
+	return HeadReader(path, n)
+}

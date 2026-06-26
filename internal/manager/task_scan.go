@@ -568,10 +568,18 @@ type scanFilter struct {
 }
 
 func newScanFilter(c *config.Config, repo models.Repository, minModTime time.Time) *scanFilter {
+	stashPaths := c.GetStashPaths()
+	// Include native Google Drive source roots so their virtual paths pass the
+	// "is in the stash library" check. They are scanned via DriveFS but are not
+	// part of the on-disk stash configuration.
+	for _, root := range GetInstance().DriveRoots() {
+		stashPaths = append(stashPaths, &config.StashConfig{Path: root})
+	}
+
 	return &scanFilter{
 		extensionConfig:   newExtensionConfig(c),
 		txnManager:        repo.TxnManager,
-		stashPaths:        c.GetStashPaths(),
+		stashPaths:        stashPaths,
 		generatedPath:     c.GetGeneratedPath(),
 		videoExcludeRegex: generateRegexps(c.GetExcludes()),
 		imageExcludeRegex: generateRegexps(c.GetImageExcludes()),

@@ -3,6 +3,7 @@ package drive
 import (
 	"context"
 	"fmt"
+	"io"
 )
 
 // downloadURLFmt is the Drive API media-download endpoint. ffprobe/ffmpeg can
@@ -19,6 +20,27 @@ func (s *Source) ProbeTarget(ctx context.Context, fileID string) (string, []stri
 	}
 	url := fmt.Sprintf(downloadURLFmt, fileID)
 	return url, []string{"Authorization: Bearer " + tok}, nil
+}
+
+// ReadHead returns up to the first n bytes of fileID via a ranged GET. Used for
+// container magic-byte detection without a full download.
+func (s *Source) ReadHead(ctx context.Context, fileID string, n int) ([]byte, error) {
+	svc, err := s.Pool.Next(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rc, err := OpenRange(ctx, svc, fileID, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	buf := make([]byte, n)
+	read, err := io.ReadFull(rc, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return nil, err
+	}
+	return buf[:read], nil
 }
 
 // Source ties a shared drive to its persistent index and credential pool. It
@@ -46,15 +68,18 @@ func (s *Source) Sync(ctx context.Context) (SyncStats, error) {
 		return SyncStats{}, err
 	}
 	if token == "" {
-		return s.fullSync(ctx)
+		return s.initialSync(ctx)
 	}
 	return s.incrementalSync(ctx, token)
 }
 
-// fullSync enumerates the entire drive. The change token is captured BEFORE
-// listing so any edits made during the (potentially long) listing are picked
-// up by the next incremental sync rather than lost.
-func (s *Source) fullSync(ctx context.Context) (SyncStats, error) {
+// initialSync prepares a brand-new source by capturing the change page token.
+// It deliberately does NOT pre-enumerate the whole drive: the index is
+// populated lazily, folder-by-folder, by DriveFS.ReadDir as the scanner walks,
+// so scenes are created continuously during the first scan instead of after a
+// long full-enumeration. Capturing the token up front means any edits during
+// the first walk are picked up by the next incremental sync.
+func (s *Source) initialSync(ctx context.Context) (SyncStats, error) {
 	svc, err := s.Pool.First(ctx)
 	if err != nil {
 		return SyncStats{}, err
@@ -64,24 +89,12 @@ func (s *Source) fullSync(ctx context.Context) (SyncStats, error) {
 	if err != nil {
 		return SyncStats{}, err
 	}
-
-	stats := SyncStats{Full: true}
-	err = ListDrive(ctx, svc, s.DriveID, func(batch []Item) error {
-		if err := s.Index.Upsert(batch); err != nil {
-			return err
-		}
-		stats.Added += len(batch)
-		return nil
-	})
-	if err != nil {
-		return stats, err
-	}
-
 	if err := s.Index.SetPageToken(startToken); err != nil {
-		return stats, err
+		return SyncStats{}, err
 	}
-	stats.Total, _ = s.Index.Count()
-	return stats, nil
+
+	n, _ := s.Index.Count()
+	return SyncStats{Full: true, Total: n}, nil
 }
 
 // incrementalSync applies only the deltas since the stored token: a handful of

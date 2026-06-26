@@ -236,6 +236,29 @@ func (f *driveFile) ReadDir(n int) ([]fs.DirEntry, error) {
 		return nil, &fs.PathError{Op: "readdir", Path: f.it.Name, Err: errors.New("not a directory")}
 	}
 	if !f.dirRead {
+		// Lazily fetch this folder's children from the Drive API the first time
+		// it is visited (caching into the index). This lets the scanner create
+		// scenes as it walks, instead of waiting for a full pre-enumeration.
+		listed, err := f.fsys.source.Index.IsListed(f.it.ID)
+		if err != nil {
+			return nil, err
+		}
+		if !listed {
+			ctx := context.Background()
+			svc, err := f.fsys.service(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if err := ListFolder(ctx, svc, f.fsys.source.DriveID, f.it.ID, func(batch []Item) error {
+				return f.fsys.source.Index.Upsert(batch)
+			}); err != nil {
+				return nil, err
+			}
+			if err := f.fsys.source.Index.MarkListed(f.it.ID); err != nil {
+				return nil, err
+			}
+		}
+
 		children, err := f.fsys.source.Index.Children(f.it.ID)
 		if err != nil {
 			return nil, err
