@@ -69,6 +69,7 @@ func (g PreviewOptions) getStepSizeAndOffset(videoDuration float64) (stepSize fl
 }
 
 func (g Generator) PreviewVideo(ctx context.Context, input string, videoDuration float64, hash string, options PreviewOptions, fallback bool, useVsync2 bool) error {
+	input = resolveInput(input)
 	lockCtx := g.LockManager.ReadLock(ctx, input)
 	defer lockCtx.Cancel()
 
@@ -260,6 +261,7 @@ func removeFiles(list []string) {
 // PreviewWebp generates a webp file based on the preview video input.
 // TODO - this should really generate a new webp using chunks.
 func (g Generator) PreviewWebp(ctx context.Context, input string, hash string) error {
+	input = resolveInput(input)
 	lockCtx := g.LockManager.ReadLock(ctx, input)
 	defer lockCtx.Cancel()
 

@@ -69,6 +69,11 @@ type Manager struct {
 	GroupService   GroupService
 
 	scanSubs *subscriptionManager
+
+	// driveSources holds the registered native Google Drive sources, mounted
+	// into the dispatching file system so the scanner operates directly against
+	// Drive instead of a FUSE mount.
+	driveSources []*managedDriveSource
 }
 
 var instance *Manager

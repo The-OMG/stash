@@ -11,6 +11,7 @@ import (
 
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/logger"
+	"github.com/stashapp/stash/pkg/mediapath"
 	"github.com/stashapp/stash/pkg/models"
 )
 
@@ -205,7 +206,14 @@ func (o TranscodeOptions) makeStreamArgs(sm *StreamManager) Args {
 		args = args.Seek(o.StartTime)
 	}
 
-	args = args.Input(o.VideoFile.Path)
+	// For Drive-backed files, resolve to a locally-cached path (downloads on
+	// demand). Local paths are returned unchanged.
+	inputPath, err := mediapath.Resolve(o.VideoFile.Path)
+	if err != nil {
+		logger.Errorf("error resolving transcode input %q: %v", o.VideoFile.Path, err)
+		inputPath = o.VideoFile.Path
+	}
+	args = args.Input(inputPath)
 
 	videoOnly := ProbeAudioCodec(o.VideoFile.AudioCodec) == MissingUnsupported
 

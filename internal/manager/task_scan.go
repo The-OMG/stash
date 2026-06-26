@@ -59,6 +59,14 @@ func (j *ScanJob) Execute(ctx context.Context, progress *job.Progress) error {
 	c := mgr.Config
 	repo := mgr.Repository
 
+	// Sync native Google Drive sources before walking: a cold full index on
+	// first run, then fast incremental Changes-API polls. For a full scan
+	// (no explicit paths), include the Drive virtual roots so they are walked.
+	mgr.SyncDriveSources(ctx)
+	if len(input.Paths) == 0 {
+		paths = append(paths, mgr.DriveRoots()...)
+	}
+
 	start := time.Now()
 
 	nTasks := cfg.GetParallelTasksWithAutoDetection()
@@ -131,7 +139,7 @@ func (j *ScanJob) runJob(ctx context.Context, paths []string, nTasks int, progre
 const scanQueueSize = 200000
 
 func (j *ScanJob) queueFiles(ctx context.Context, paths []string, progress *job.Progress) error {
-	fs := &file.OsFS{}
+	fs := file.DefaultFS()
 
 	defer func() {
 		close(j.fileQueue)

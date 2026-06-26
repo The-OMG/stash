@@ -14,6 +14,7 @@ import (
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/ffmpeg/transcoder"
 	"github.com/stashapp/stash/pkg/logger"
+	"github.com/stashapp/stash/pkg/mediapath"
 	"github.com/stashapp/stash/pkg/models"
 )
 
@@ -79,6 +80,12 @@ func combineImages(images []image.Image) image.Image {
 func generateSprite(encoder *ffmpeg.FFMpeg, videoFile *models.VideoFile) (image.Image, error) {
 	logger.Infof("[generator] generating phash sprite for %s", videoFile.Path)
 
+	// Resolve Drive-backed paths to a local cached file for ffmpeg.
+	input := videoFile.Path
+	if p, err := mediapath.Resolve(videoFile.Path); err == nil {
+		input = p
+	}
+
 	// Generate sprite image offset by 5% on each end to avoid intro/outros
 	chunkCount := columns * rows
 	offset := 0.05 * videoFile.Duration
@@ -87,7 +94,7 @@ func generateSprite(encoder *ffmpeg.FFMpeg, videoFile *models.VideoFile) (image.
 	for i := 0; i < chunkCount; i++ {
 		time := offset + (float64(i) * stepSize)
 
-		img, err := generateSpriteScreenshot(encoder, videoFile.Path, time)
+		img, err := generateSpriteScreenshot(encoder, input, time)
 		if err != nil {
 			return nil, fmt.Errorf("generating sprite screenshot: %w", err)
 		}

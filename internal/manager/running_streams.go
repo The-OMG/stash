@@ -12,6 +12,7 @@ import (
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/logger"
+	"github.com/stashapp/stash/pkg/mediapath"
 	"github.com/stashapp/stash/pkg/models"
 	"github.com/stashapp/stash/pkg/txn"
 	"github.com/stashapp/stash/pkg/utils"
@@ -48,7 +49,16 @@ func (s *SceneServer) StreamSceneDirect(scene *models.Scene, w http.ResponseWrit
 
 	sceneHash := scene.GetHash(config.GetInstance().GetVideoFileNamingAlgorithm())
 
-	fp := GetInstance().Paths.Scene.GetStreamPath(scene.Path, sceneHash)
+	// For Drive-backed scenes, resolve the virtual path to a locally-cached
+	// file (downloading on demand). Local paths pass through unchanged.
+	scenePath, err := mediapath.Resolve(scene.Path)
+	if err != nil {
+		logger.Errorf("error resolving scene media path %q: %v", scene.Path, err)
+		http.Error(w, http.StatusText(500), 500)
+		return
+	}
+
+	fp := GetInstance().Paths.Scene.GetStreamPath(scenePath, sceneHash)
 	streamRequestCtx := ffmpeg.NewStreamRequestContext(w, r)
 
 	// #2579 - hijacking and closing the connection here causes video playback to fail in Safari

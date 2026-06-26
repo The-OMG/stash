@@ -11,7 +11,19 @@ import (
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/fsutil"
+	"github.com/stashapp/stash/pkg/mediapath"
 )
+
+// resolveInput maps a possibly-virtual (Google Drive) input path to a local
+// file path, downloading into the cache on demand. Local paths pass through
+// unchanged. ffmpeg requires a real seekable file, so every generator entry
+// point resolves its input before shelling out.
+func resolveInput(input string) string {
+	if p, err := mediapath.Resolve(input); err == nil {
+		return p
+	}
+	return input
+}
 
 const (
 	mp4Pattern  = "*.mp4"

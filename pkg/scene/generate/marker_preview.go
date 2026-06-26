@@ -21,6 +21,7 @@ const (
 )
 
 func (g Generator) MarkerPreviewVideo(ctx context.Context, input string, hash string, seconds float64, endSeconds *float64, includeAudio bool) error {
+	input = resolveInput(input)
 	lockCtx := g.LockManager.ReadLock(ctx, input)
 	defer lockCtx.Cancel()
 
@@ -100,6 +101,7 @@ func (g Generator) markerPreviewVideo(input string, options sceneMarkerOptions) 
 }
 
 func (g Generator) SceneMarkerWebp(ctx context.Context, input string, hash string, seconds float64) error {
+	input = resolveInput(input)
 	lockCtx := g.LockManager.ReadLock(ctx, input)
 	defer lockCtx.Cancel()
 
@@ -153,6 +155,7 @@ func (g Generator) sceneMarkerWebp(input string, options sceneMarkerOptions) gen
 }
 
 func (g Generator) SceneMarkerScreenshot(ctx context.Context, input string, hash string, seconds float64, width int) error {
+	input = resolveInput(input)
 	lockCtx := g.LockManager.ReadLock(ctx, input)
 	defer lockCtx.Cancel()
 

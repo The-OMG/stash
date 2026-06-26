@@ -19,6 +19,7 @@ import (
 )
 
 func (g Generator) SpriteScreenshot(ctx context.Context, input string, seconds float64, size int, isPortrait bool) (image.Image, error) {
+	input = resolveInput(input)
 	lockCtx := g.LockManager.ReadLock(ctx, input)
 	defer lockCtx.Cancel()
 
@@ -39,6 +40,7 @@ func (g Generator) SpriteScreenshot(ctx context.Context, input string, seconds f
 }
 
 func (g Generator) SpriteScreenshotSlow(ctx context.Context, input string, frame int, width int) (image.Image, error) {
+	input = resolveInput(input)
 	lockCtx := g.LockManager.ReadLock(ctx, input)
 	defer lockCtx.Cancel()
 

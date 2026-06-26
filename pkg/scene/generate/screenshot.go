@@ -22,6 +22,7 @@ type ScreenshotOptions struct {
 }
 
 func (g Generator) Screenshot(ctx context.Context, input string, videoWidth int, videoDuration float64, options ScreenshotOptions) ([]byte, error) {
+	input = resolveInput(input)
 	lockCtx := g.LockManager.ReadLock(ctx, input)
 	defer lockCtx.Cancel()
 

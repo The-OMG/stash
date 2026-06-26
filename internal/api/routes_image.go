@@ -132,7 +132,7 @@ func (rs imageRoutes) Image(w http.ResponseWriter, r *http.Request) {
 
 func (rs imageRoutes) serveImage(w http.ResponseWriter, r *http.Request, i *models.Image, useDefault bool) {
 	if i.Files.Primary() != nil {
-		err := i.Files.Primary().Base().Serve(&file.OsFS{}, w, r)
+		err := i.Files.Primary().Base().Serve(file.DefaultFS(), w, r)
 		if err == nil {
 			return
 		}

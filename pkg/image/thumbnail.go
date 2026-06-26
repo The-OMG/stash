@@ -14,8 +14,20 @@ import (
 	"github.com/stashapp/stash/pkg/ffmpeg/transcoder"
 	"github.com/stashapp/stash/pkg/file"
 	"github.com/stashapp/stash/pkg/fsutil"
+	"github.com/stashapp/stash/pkg/mediapath"
 	"github.com/stashapp/stash/pkg/models"
 )
+
+// resolveThumbPath maps a possibly-virtual (Google Drive) path to a local
+// cached file, for the thumbnail code paths that need a real file (ffmpeg/vips
+// by path, AVIF). The streaming reader path for normal images reads via the
+// dispatching FS and does not download the whole file.
+func resolveThumbPath(p string) string {
+	if r, err := mediapath.Resolve(p); err == nil {
+		return r
+	}
+	return p
+}
 
 const ffmpegImageQuality = 5
 
@@ -66,7 +78,7 @@ func NewThumbnailEncoder(ffmpegEncoder *ffmpeg.FFMpeg, ffProbe *ffmpeg.FFProbe, 
 // It returns nil and an error if an error occurs reading, decoding or encoding
 // the image, or if the image is not suitable for thumbnails.
 func (e *ThumbnailEncoder) GetThumbnail(f models.File, maxSize int) ([]byte, error) {
-	reader, err := f.Open(&file.OsFS{})
+	reader, err := f.Open(file.DefaultFS())
 	if err != nil {
 		return nil, err
 	}
@@ -102,9 +114,9 @@ func (e *ThumbnailEncoder) GetThumbnail(f models.File, maxSize int) ([]byte, err
 				return nil, fmt.Errorf("%w: AVIF in zip file", ErrNotSupportedForThumbnail)
 			}
 			if e.vips != nil {
-				return e.vips.ImageThumbnailPath(f.Base().Path, maxSize)
+				return e.vips.ImageThumbnailPath(resolveThumbPath(f.Base().Path), maxSize)
 			}
-			return e.ffmpegImageThumbnailPath(f.Base().Path, maxSize)
+			return e.ffmpegImageThumbnailPath(resolveThumbPath(f.Base().Path), maxSize)
 		}
 	}
 
@@ -116,7 +128,7 @@ func (e *ThumbnailEncoder) GetThumbnail(f models.File, maxSize int) ([]byte, err
 	// vips has issues loading files from stdin on Windows
 	if e.vips != nil {
 		if runtime.GOOS == "windows" && f.Base().ZipFileID == nil {
-			return e.vips.ImageThumbnailPath(f.Base().Path, maxSize)
+			return e.vips.ImageThumbnailPath(resolveThumbPath(f.Base().Path), maxSize)
 		}
 		if runtime.GOOS != "windows" {
 			return e.vips.ImageThumbnail(buf, maxSize)
