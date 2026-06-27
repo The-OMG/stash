@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/stashapp/stash/pkg/models"
@@ -24,6 +25,7 @@ var errNotSupported = errors.New("operation not supported on drive fs")
 type DriveFS struct {
 	source *Source
 	root   string // virtual library root this FS is mounted at, e.g. /$gdrive/<id>
+	listMu sync.Map // folder id -> *sync.Mutex, serialises lazy listing per folder
 }
 
 // NewDriveFS mounts a Source at the given virtual root path.
@@ -244,18 +246,32 @@ func (f *driveFile) ReadDir(n int) ([]fs.DirEntry, error) {
 			return nil, err
 		}
 		if !listed {
-			ctx := context.Background()
-			svc, err := f.fsys.service(ctx)
+			// Serialise per-folder so concurrent ReadDir calls don't both
+			// enumerate the same folder from the API.
+			muI, _ := f.fsys.listMu.LoadOrStore(f.it.ID, &sync.Mutex{})
+			mu := muI.(*sync.Mutex)
+			mu.Lock()
+			defer mu.Unlock()
+
+			// re-check under the lock
+			listed, err = f.fsys.source.Index.IsListed(f.it.ID)
 			if err != nil {
 				return nil, err
 			}
-			if err := ListFolder(ctx, svc, f.fsys.source.DriveID, f.it.ID, func(batch []Item) error {
-				return f.fsys.source.Index.Upsert(batch)
-			}); err != nil {
-				return nil, err
-			}
-			if err := f.fsys.source.Index.MarkListed(f.it.ID); err != nil {
-				return nil, err
+			if !listed {
+				ctx := context.Background()
+				svc, err := f.fsys.service(ctx)
+				if err != nil {
+					return nil, err
+				}
+				if err := ListFolder(ctx, svc, f.fsys.source.DriveID, f.it.ID, func(batch []Item) error {
+					return f.fsys.source.Index.Upsert(batch)
+				}); err != nil {
+					return nil, err
+				}
+				if err := f.fsys.source.Index.MarkListed(f.it.ID); err != nil {
+					return nil, err
+				}
 			}
 		}
 

@@ -10,14 +10,29 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )
+
+// normalizeScope expands rclone-style short scopes ("drive", "drive.readonly")
+// to the full URLs the Google libraries require, and defaults to full Drive.
+func normalizeScope(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return DefaultScope
+	}
+	if strings.Contains(scope, "://") {
+		return scope
+	}
+	return "https://www.googleapis.com/auth/" + scope
+}
 
 // DefaultScope grants full Drive access. Use drive.DriveReadonlyScope for
 // read-only sources.
@@ -51,9 +66,7 @@ type OAuthSource struct {
 // token (with a refresh token). An empty clientID falls back to rclone's
 // default client.
 func NewOAuthSource(ctx context.Context, clientID, clientSecret, scope string, token *oauth2.Token) (*OAuthSource, error) {
-	if scope == "" {
-		scope = DefaultScope
-	}
+	scope = normalizeScope(scope)
 	if clientID == "" {
 		clientID = rcloneDefaultClientID
 		clientSecret = rcloneDefaultClientSecret
@@ -78,12 +91,20 @@ func NewOAuthSource(ctx context.Context, clientID, clientSecret, scope string, t
 // NewOAuthSourceFromRcloneToken builds an OAuth source from an rclone remote's
 // token JSON ({"access_token","refresh_token","token_type","expiry"}).
 func NewOAuthSourceFromRcloneToken(ctx context.Context, tokenJSON, clientID, clientSecret, scope string) (*OAuthSource, error) {
+	if strings.TrimSpace(tokenJSON) == "" {
+		return nil, fmt.Errorf("oauth selected but token is empty")
+	}
 	var tok oauth2.Token
 	if err := json.Unmarshal([]byte(tokenJSON), &tok); err != nil {
 		return nil, fmt.Errorf("parsing rclone token: %w", err)
 	}
 	if tok.RefreshToken == "" {
 		return nil, fmt.Errorf("rclone token has no refresh_token")
+	}
+	// A zero expiry makes oauth2 treat the access token as non-expiring; force a
+	// refresh on first use so a stale imported access token is renewed.
+	if tok.Expiry.IsZero() {
+		tok.Expiry = time.Unix(1, 0)
 	}
 	return NewOAuthSource(ctx, clientID, clientSecret, scope, &tok)
 }
@@ -121,9 +142,7 @@ type SAPool struct {
 // JSON file or a directory containing many of them (e.g. an rclone gdsa key
 // directory).
 func NewSAPool(path, scope string) (*SAPool, error) {
-	if scope == "" {
-		scope = DefaultScope
-	}
+	scope = normalizeScope(scope)
 
 	info, err := os.Stat(path)
 	if err != nil {

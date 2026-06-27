@@ -5,11 +5,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	gdrive "google.golang.org/api/drive/v3"
 )
+
+// thumbClient fetches Drive thumbnail images with a bounded timeout.
+var thumbClient = &http.Client{Timeout: 30 * time.Second}
+
+// thumbSizeRe matches a trailing Drive thumbnail size token, e.g. "=s220" or
+// "=s220-c".
+var thumbSizeRe = regexp.MustCompile(`=s\d+(-[a-z0-9]+)*$`)
 
 // downloadURLFmt is the Drive API media-download endpoint. ffprobe/ffmpeg can
 // read this URL with an Authorization header and issue HTTP range requests, so
@@ -56,7 +65,7 @@ func (s *Source) ThumbnailData(ctx context.Context, fileID string, size int) ([]
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := thumbClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -64,15 +73,24 @@ func (s *Source) ThumbnailData(ctx context.Context, fileID string, size int) ([]
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("thumbnail fetch for %s: %s", fileID, resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	// guard against an empty/HTML error body being stored as a cover
+	if len(data) == 0 || !strings.HasPrefix(http.DetectContentType(data), "image/") {
+		return nil, fmt.Errorf("drive thumbnail for %s is not an image", fileID)
+	}
+	return data, nil
 }
 
-// resizeThumbLink adjusts the "=sNNN" size suffix on a Drive thumbnail link.
+// resizeThumbLink adjusts the "=sNNN" size suffix on a Drive thumbnail link,
+// leaving the link unchanged when no such suffix is present.
 func resizeThumbLink(link string, size int) string {
-	if i := strings.LastIndex(link, "=s"); i != -1 {
-		return link[:i] + "=s" + strconv.Itoa(size)
+	if thumbSizeRe.MatchString(link) {
+		return thumbSizeRe.ReplaceAllString(link, "=s"+strconv.Itoa(size))
 	}
-	return link + "=s" + strconv.Itoa(size)
+	return link
 }
 
 // StreamRange issues a ranged GET to Drive and returns the raw HTTP response

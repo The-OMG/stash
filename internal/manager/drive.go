@@ -115,14 +115,17 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 		return
 	}
 
-	// unmount previously registered roots
-	for _, ms := range s.driveSources {
+	// detach the previous set under lock, then unmount/close it
+	s.driveMu.Lock()
+	old := s.driveSources
+	s.driveSources = nil
+	s.driveMu.Unlock()
+	for _, ms := range old {
 		file.DefaultFS().Unmount(ms.root)
 		if ms.source != nil && ms.source.Index != nil {
 			ms.source.Index.Close()
 		}
 	}
-	s.driveSources = nil
 
 	indexDir := filepath.Join(s.Config.GetConfigPath(), "gdrive")
 	if err := os.MkdirAll(indexDir, 0o755); err != nil {
@@ -130,6 +133,7 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 		return
 	}
 
+	var newSources []*managedDriveSource
 	for _, sc := range cfg.Sources {
 		if sc.ID == "" || (sc.DriveID == "" && sc.RcloneRemote == "") {
 			// don't %+v the config — it carries client_secret / oauth token.
@@ -175,12 +179,17 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 		}
 
 		file.DefaultFS().Mount(root, dfs)
-		s.driveSources = append(s.driveSources, &managedDriveSource{
+		newSources = append(newSources, &managedDriveSource{
 			cfg: sc, source: source, fs: dfs, cache: cache, root: root,
 		})
 		logger.Infof("drive[%s]: mounted shared drive %s at %s (%d account(s), %s)",
 			sc.ID, sc.DriveID, root, auth.Len(), index.String())
 	}
+
+	// publish the new set atomically
+	s.driveMu.Lock()
+	s.driveSources = newSources
+	s.driveMu.Unlock()
 
 	// install the media path resolvers:
 	//  - Resolver: full local cache download for content processing (playback,
@@ -207,6 +216,10 @@ func (s *Manager) resolveMeta(path string) (mediapath.Meta, bool, error) {
 	it, found, err := ms.source.Index.LookupPath(rel)
 	if err != nil || !found {
 		return mediapath.Meta{}, false, err
+	}
+	// Only report metadata Drive actually populated (0 means unprocessed).
+	if it.Width <= 0 || it.Height <= 0 {
+		return mediapath.Meta{}, false, nil
 	}
 	return mediapath.Meta{Width: it.Width, Height: it.Height, DurationMS: it.DurationMS}, true, nil
 }
@@ -258,7 +271,11 @@ func (s *Manager) StreamDriveDirect(w http.ResponseWriter, r *http.Request, path
 	}
 	defer resp.Body.Close()
 
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = it.MimeType
+	}
+	if ct != "" {
 		h.Set("Content-Type", ct)
 	}
 	if cr := resp.Header.Get("Content-Range"); cr != "" {
@@ -272,11 +289,19 @@ func (s *Manager) StreamDriveDirect(w http.ResponseWriter, r *http.Request, path
 	return true
 }
 
+// driveSourceList returns a snapshot of the mounted sources for safe concurrent
+// iteration (RefreshDriveSources swaps the slice under driveMu).
+func (s *Manager) driveSourceList() []*managedDriveSource {
+	s.driveMu.RLock()
+	defer s.driveMu.RUnlock()
+	return s.driveSources
+}
+
 // driveSourceForPath returns the mounted source owning path and the
 // drive-relative path under it.
 func (s *Manager) driveSourceForPath(path string) (*managedDriveSource, string, bool) {
 	clean := filepath.Clean(path)
-	for _, ms := range s.driveSources {
+	for _, ms := range s.driveSourceList() {
 		if clean == ms.root || strings.HasPrefix(clean, ms.root+string(filepath.Separator)) {
 			rel := strings.TrimPrefix(strings.TrimPrefix(clean, ms.root), string(filepath.Separator))
 			return ms, rel, true
@@ -309,6 +334,8 @@ func (s *Manager) Trash(path string) (string, error) {
 	if err := ms.source.SetTrashed(context.Background(), it.ID, true); err != nil {
 		return "", err
 	}
+	// keep the index view consistent immediately (don't wait for a sync)
+	_ = ms.source.Index.SetTrashedByID(it.ID, true)
 	return ms.cfg.ID + "\x00" + it.ID, nil
 }
 
@@ -322,9 +349,13 @@ func (s *Manager) Untrash(handle string) error {
 	if !ok {
 		return fmt.Errorf("invalid trash handle")
 	}
-	for _, ms := range s.driveSources {
+	for _, ms := range s.driveSourceList() {
 		if ms.cfg.ID == srcID {
-			return ms.source.SetTrashed(context.Background(), fileID, false)
+			if err := ms.source.SetTrashed(context.Background(), fileID, false); err != nil {
+				return err
+			}
+			_ = ms.source.Index.SetTrashedByID(fileID, false)
+			return nil
 		}
 	}
 	return fmt.Errorf("drive source %q not found to restore file", srcID)
@@ -335,7 +366,7 @@ func (s *Manager) Untrash(handle string) error {
 // false for local paths or when Drive has no thumbnail (caller generates one).
 func (s *Manager) resolveThumb(path string, size int) ([]byte, bool, error) {
 	clean := filepath.Clean(path)
-	for _, ms := range s.driveSources {
+	for _, ms := range s.driveSourceList() {
 		if clean != ms.root && !strings.HasPrefix(clean, ms.root+string(filepath.Separator)) {
 			continue
 		}
@@ -360,7 +391,7 @@ func (s *Manager) resolveThumb(path string, size int) ([]byte, bool, error) {
 // (for container magic-byte detection). ok is false for local paths.
 func (s *Manager) resolveHead(path string, n int) ([]byte, bool, error) {
 	clean := filepath.Clean(path)
-	for _, ms := range s.driveSources {
+	for _, ms := range s.driveSourceList() {
 		if clean != ms.root && !strings.HasPrefix(clean, ms.root+string(filepath.Separator)) {
 			continue
 		}
@@ -385,7 +416,7 @@ func (s *Manager) resolveHead(path string, n int) ([]byte, bool, error) {
 // ffprobe input URL + headers. ok is false for local paths (probe by path).
 func (s *Manager) resolveProbeTarget(path string) (string, []string, bool, error) {
 	clean := filepath.Clean(path)
-	for _, ms := range s.driveSources {
+	for _, ms := range s.driveSourceList() {
 		if clean != ms.root && !strings.HasPrefix(clean, ms.root+string(filepath.Separator)) {
 			continue
 		}
@@ -410,7 +441,7 @@ func (s *Manager) resolveProbeTarget(path string) (string, []string, bool, error
 // downloading on demand. Non-Drive (local) paths are returned unchanged.
 func (s *Manager) resolveMediaPath(path string) (string, error) {
 	clean := filepath.Clean(path)
-	for _, ms := range s.driveSources {
+	for _, ms := range s.driveSourceList() {
 		if clean != ms.root && !strings.HasPrefix(clean, ms.root+string(filepath.Separator)) {
 			continue
 		}
@@ -431,7 +462,7 @@ func (s *Manager) resolveMediaPath(path string) (string, error) {
 // to be appended to the scanner's root paths.
 func (s *Manager) DriveRoots() []string {
 	roots := make([]string, 0, len(s.driveSources))
-	for _, ms := range s.driveSources {
+	for _, ms := range s.driveSourceList() {
 		roots = append(roots, ms.root)
 	}
 	return roots
@@ -533,7 +564,7 @@ func (s *Manager) ListDriveSources() []DriveSourceStatus {
 		return nil
 	}
 	mounted := make(map[string]*managedDriveSource, len(s.driveSources))
-	for _, ms := range s.driveSources {
+	for _, ms := range s.driveSourceList() {
 		mounted[ms.cfg.ID] = ms
 	}
 
@@ -651,7 +682,7 @@ func (s *Manager) RemoveDriveSource(ctx context.Context, id string) error {
 
 // SyncDriveSourceByID triggers a background index sync for one mounted source.
 func (s *Manager) SyncDriveSourceByID(id string) error {
-	for _, ms := range s.driveSources {
+	for _, ms := range s.driveSourceList() {
 		if ms.cfg.ID == id {
 			go func(m *managedDriveSource) {
 				if _, err := m.source.Sync(context.Background()); err != nil {
@@ -668,7 +699,7 @@ func (s *Manager) SyncDriveSourceByID(id string) error {
 // list on first run, then fast incremental Changes-API polls. Called before a
 // scan so the dispatcher's view of each drive is current.
 func (s *Manager) SyncDriveSources(ctx context.Context) {
-	for _, ms := range s.driveSources {
+	for _, ms := range s.driveSourceList() {
 		stats, err := ms.source.Sync(ctx)
 		if err != nil {
 			logger.Errorf("drive[%s]: sync: %v", ms.cfg.ID, err)

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/remeh/sizedwaitgroup"
@@ -72,8 +73,10 @@ type Manager struct {
 
 	// driveSources holds the registered native Google Drive sources, mounted
 	// into the dispatching file system so the scanner operates directly against
-	// Drive instead of a FUSE mount.
+	// Drive instead of a FUSE mount. Guarded by driveMu (rebuilt by
+	// RefreshDriveSources while readers/scans iterate it concurrently).
 	driveSources []*managedDriveSource
+	driveMu      sync.RWMutex
 }
 
 var instance *Manager

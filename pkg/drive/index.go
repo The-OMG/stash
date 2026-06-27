@@ -65,7 +65,10 @@ func OpenIndex(dbPath, driveID, rootID string) (*Index, error) {
 		"ALTER TABLE items ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE items ADD COLUMN has_thumb INTEGER NOT NULL DEFAULT 0",
 	} {
-		db.Exec(col) // ignore "duplicate column" on existing indexes
+		if _, err := db.Exec(col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migrating index: %w", err)
+		}
 	}
 	if rootID == "" {
 		rootID = driveID
@@ -142,6 +145,13 @@ func (i *Index) Upsert(items []Item) error {
 // Delete removes an item (e.g. on a Changes removal/trash event).
 func (i *Index) Delete(id string) error {
 	_, err := i.db.Exec(`DELETE FROM items WHERE id = ?`, id)
+	return err
+}
+
+// SetTrashedByID flips the trashed flag for an item, keeping the dispatcher's
+// view consistent after a trash/untrash without waiting for a Changes sync.
+func (i *Index) SetTrashedByID(id string, trashed bool) error {
+	_, err := i.db.Exec(`UPDATE items SET trashed = ? WHERE id = ?`, trashed, id)
 	return err
 }
 

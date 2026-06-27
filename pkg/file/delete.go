@@ -182,6 +182,16 @@ func (d *Deleter) DirsWithoutTrash(paths []string) error {
 
 func (d *Deleter) dirsInternal(paths []string, bypassTrash bool) error {
 	for _, p := range paths {
+		// Remote (Drive) directories: move to the remote trash like files.
+		if DriveTrasher != nil && DriveTrasher.IsManaged(p) {
+			handle, err := DriveTrasher.Trash(p)
+			if err != nil {
+				return fmt.Errorf("trashing remote directory %q: %w", p, err)
+			}
+			d.managed = append(d.managed, handle)
+			continue
+		}
+
 		// fail silently if the file does not exist
 		if _, err := d.RenamerRemover.Stat(p); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
