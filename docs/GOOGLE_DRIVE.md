@@ -17,34 +17,57 @@ Google Drive API directly:
 
 ## Authentication
 
-Auth uses **Google service-account JSON** credentials. Point a source at either:
+Two options — use whichever fits:
+
+### Google OAuth (recommended for most users)
+
+Connect your own Google account and pick from your accessible shared drives.
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+   enable the **Drive API** and create an **OAuth client → Web application**.
+2. Add the redirect URI shown in **Settings → Library → Google Drive → Connect**
+   (it's `<your-stash-url>/oauth/google/callback`) to the client.
+3. Paste the client ID/secret into stash (or ship a built-in client by setting
+   `builtinGoogleClientID/Secret` in `internal/manager/drive_oauth.go`), then click
+   **Connect Google Drive** and approve. The refresh token is stored in
+   `<config>/gdrive_oauth.json` (mode 0600).
+
+Sources added "via the connected account" use `auth_type: oauth` and reference the
+connected token — no per-source credentials. You can **Edit OAuth client**,
+**Disconnect**, or **Clear client & reset** from the same screen.
+
+### Service account(s)
+
+Point a source at either:
 
 - a single service-account `.json` file, or
-- a **directory** of service-account `.json` files — these are used as a pool and
-  rotated to spread Drive API quota (handy for very large libraries / heavy media
-  caching).
+- a **directory** of service-account `.json` files — used as a pool and rotated to
+  spread Drive API quota (handy for very large libraries / heavy media caching).
 
 The service account(s) must be granted access to the shared drive (add the
-`client_email` as a member of the shared drive, or use a domain-wide-delegated
-account).
+`client_email` as a member, or use a domain-wide-delegated account). Service
+accounts are offered as the **Advanced** option in the Add-source dialog.
 
 ## Configuring sources
 
 ### From the UI
 
-**Settings → Library → Google Drive Sources.** Add a source with:
+**Settings → Library → Google Drive** has three steps:
 
-| Field | Meaning |
-|-------|---------|
-| ID | stable identifier; used in the virtual library path `/__gdrive__/<id>` |
-| Name | display name |
-| Shared drive id | the team-drive id (e.g. `0AEFojjZ0gu-9Uk9PVA`) |
-| Service-account JSON | path to a `.json` file or a directory of them |
-| OAuth scope | optional; defaults to full Drive. Use `https://www.googleapis.com/auth/drive.readonly` for read-only |
-| Cache directory | optional; defaults to `<cache>/gdrive/<id>` |
+1. **Connect** — set up the OAuth client (above) and connect your account
+   (optional if you only use service accounts).
+2. **Sources** — **Add Drive source…** opens a picker. With a connected account,
+   choose from your shared drives and browse into a sub-folder to scope it; or
+   switch to **Service account (advanced)** and enter a keys path + drive id.
+   Per-source options include **Fast scan** (use Drive's duration/dimensions and
+   skip ffprobe — faster, no codec detail).
+3. **Migrate** — repoint an existing rclone-mounted library onto a source by path
+   (see below).
 
-Adding a source validates Drive access immediately, mounts it, and it is included
-in the next **Scan**.
+Each source gets a stable **ID** used in the virtual library path
+`/__gdrive__/<id>`. Adding a source validates Drive access immediately and mounts
+it. Use **Index** on a source to pre-build/refresh its index without a full scan;
+**Remove** unmounts it.
 
 ### Sidecar config (equivalent)
 
@@ -60,13 +83,17 @@ Sources are stored in `<config>/gdrive_sources.json`:
       "keys_path": "/home/theomg/keys",
       "scope": "https://www.googleapis.com/auth/drive.readonly",
       "cache_dir": "",
-      "cache_bytes": 53687091200
+      "cache_bytes": 53687091200,
+      "auth_type": "sa",
+      "fast_scan": false
     }
   ]
 }
 ```
 
-`cache_bytes` defaults to 50 GiB if unset/zero.
+`cache_bytes` defaults to 50 GiB if unset/zero (per source, LRU-evicted).
+`auth_type` is `sa` (default) or `oauth` (uses the connected account, no
+`keys_path` needed). `fast_scan` skips ffprobe using Drive's native metadata.
 
 ## How a scan works
 
@@ -77,6 +104,30 @@ Sources are stored in `<config>/gdrive_sources.json`:
    applied — additions, edits, and trashes/removals — then stash's normal scan
    and cleanup run over the (now-current) index. Deletions on the drive are
    detected and cleaned up without a full re-walk.
+
+## Migrating an existing (rclone-mounted) library
+
+If your library is already scanned from an rclone mount, you can repoint those
+scenes onto a native Drive source **without re-scanning or re-hashing** — file
+ids, fingerprints, and all scene/performer/tag links are preserved; only each
+file's path changes.
+
+**Settings → Library → Google Drive → Migrate:** enter the existing path prefix
+(e.g. `/home/theomg/cloud`) and the target Drive source, then:
+
+- **Preview (dry run)** — reports `candidates`, `would migrate`, `not in DB`,
+  `size mismatch`, `collision` without changing anything.
+- **Migrate** — repoints matched files.
+
+Both run as background **jobs** (visible on the Tasks page with live progress);
+the last result is shown in the Migrate panel via `driveMigrateStatus`. Matching
+is by **relative path + size** (`require_size`, on by default) against the drive
+index, so only files that genuinely exist on the target drive are touched. Run
+the migration **before** scanning a drive to avoid creating duplicate entries.
+
+Mechanics: the drive index is iterated and joined against a one-shot lightweight
+`path → size` map of the DB (`FileStore.FindPathSizes`); matched files have their
+`parent_folder_id` repointed to the drive folder (created as needed).
 
 ## Architecture
 
@@ -100,9 +151,14 @@ the local disk, so local and Drive libraries coexist transparently.
 
 ## Limitations / notes
 
-- Generating sprites/previews/phash for Drive videos downloads the whole file to
-  the cache (ffmpeg needs a seekable file) — expected, and bounded by the cache
-  cap.
+- **Scrub sprites** are generated **on demand**: the first time a Drive-backed
+  scene's scrubber/VTT is requested, the sprite + thumbs VTT are generated and
+  cached (deduped per scene). Generating sprites/previews/phash downloads the
+  whole file to the cache (ffmpeg needs a seekable file) — expected, and bounded
+  by the cache cap. (A future optimization is to seek over the ranged URL and read
+  only the needed segments rather than the whole file.)
+- **Cover thumbnails** are served directly from Drive's `thumbnailLink` (no
+  download). Durations/resolutions come free from Drive's `videoMediaMetadata`.
 - Zip/gallery archives inside Drive are not opened over the API (they would need
   the whole file as a `ReaderAt`); such files are skipped by the scanner.
 - `md5` hashing is best left disabled for Drive sources (whole-file read); the

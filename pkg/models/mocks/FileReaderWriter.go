@@ -245,6 +245,29 @@ func (_m *FileReaderWriter) FindByPath(ctx context.Context, path string, caseSen
 	return r0, r1
 }
 
+// FindPathSizes provides a mock function with given fields: ctx, roots
+func (_m *FileReaderWriter) FindPathSizes(ctx context.Context, roots []string) (map[string]int64, error) {
+	ret := _m.Called(ctx, roots)
+
+	var r0 map[string]int64
+	if rf, ok := ret.Get(0).(func(context.Context, []string) map[string]int64); ok {
+		r0 = rf(ctx, roots)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(map[string]int64)
+		}
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(context.Context, []string) error); ok {
+		r1 = rf(ctx, roots)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
 // FindByZipFileID provides a mock function with given fields: ctx, zipFileID
 func (_m *FileReaderWriter) FindByZipFileID(ctx context.Context, zipFileID models.FileID) ([]models.File, error) {
 	ret := _m.Called(ctx, zipFileID)

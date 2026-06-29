@@ -123,7 +123,7 @@ func OAuthConfig(clientID, clientSecret, redirectURI, scope string) *oauth2.Conf
 
 func (o *OAuthSource) Next(ctx context.Context) (*drive.Service, error)  { return o.svc, nil }
 func (o *OAuthSource) First(ctx context.Context) (*drive.Service, error) { return o.svc, nil }
-func (o *OAuthSource) Len() int                                         { return 1 }
+func (o *OAuthSource) Len() int                                          { return 1 }
 func (o *OAuthSource) Token(ctx context.Context) (string, error) {
 	t, err := o.ts.Token()
 	if err != nil {

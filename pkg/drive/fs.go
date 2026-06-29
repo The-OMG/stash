@@ -24,7 +24,7 @@ var errNotSupported = errors.New("operation not supported on drive fs")
 // file content is streamed via ranged GETs.
 type DriveFS struct {
 	source *Source
-	root   string // virtual library root this FS is mounted at, e.g. /$gdrive/<id>
+	root   string   // virtual library root this FS is mounted at, e.g. /$gdrive/<id>
 	listMu sync.Map // folder id -> *sync.Mutex, serialises lazy listing per folder
 }
 
@@ -119,8 +119,8 @@ func (i *driveFileInfo) Mode() fs.FileMode {
 	return 0o444
 }
 func (i *driveFileInfo) ModTime() time.Time { return i.it.ModTime }
-func (i *driveFileInfo) IsDir() bool         { return i.it.IsFolder }
-func (i *driveFileInfo) Sys() any            { return i.it }
+func (i *driveFileInfo) IsDir() bool        { return i.it.IsFolder }
+func (i *driveFileInfo) Sys() any           { return i.it }
 
 // driveDirEntry adapts an Item to fs.DirEntry.
 type driveDirEntry struct{ it Item }
@@ -315,9 +315,9 @@ func (f *driveFile) Close() error {
 
 // ensure interface satisfaction at compile time.
 var (
-	_ models.FS       = (*DriveFS)(nil)
-	_ fs.ReadDirFile  = (*driveFile)(nil)
-	_ io.ReadSeeker   = (*driveFile)(nil)
-	_ fs.FileInfo     = (*driveFileInfo)(nil)
-	_ fs.DirEntry     = (*driveDirEntry)(nil)
+	_ models.FS      = (*DriveFS)(nil)
+	_ fs.ReadDirFile = (*driveFile)(nil)
+	_ io.ReadSeeker  = (*driveFile)(nil)
+	_ fs.FileInfo    = (*driveFileInfo)(nil)
+	_ fs.DirEntry    = (*driveDirEntry)(nil)
 )
