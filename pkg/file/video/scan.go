@@ -4,11 +4,38 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/stashapp/stash/pkg/ffmpeg"
 	"github.com/stashapp/stash/pkg/mediapath"
 	"github.com/stashapp/stash/pkg/models"
 )
+
+// fastContainer maps a file extension to the ffprobe container_name stash
+// expects, for the fast-scan path (no ffprobe).
+func fastContainer(p string) string {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(p), ".")) {
+	case "mkv", "webm":
+		return "matroska,webm"
+	case "mp4", "m4v", "mov":
+		return "mov,mp4,m4a,3gp,3g2,mj2"
+	case "ts", "m2ts", "mts":
+		return "mpegts"
+	case "avi":
+		return "avi"
+	case "wmv", "asf":
+		return "asf"
+	case "flv":
+		return "flv"
+	case "mpg", "mpeg":
+		return "mpeg"
+	case "ext":
+		return ""
+	default:
+		return strings.ToLower(strings.TrimPrefix(filepath.Ext(p), "."))
+	}
+}
 
 // Decorator adds video specific fields to a File.
 type Decorator struct {
@@ -24,6 +51,29 @@ func (d *Decorator) Decorate(ctx context.Context, fs models.FS, f models.File) (
 	// ffprobe cannot read files inside zip archives directly.
 	if base.ZipFile != nil {
 		return f, fmt.Errorf("video.constructFile: zip-contained files are not supported")
+	}
+
+	// Fast scan: a backend (Google Drive) can supply duration/dimensions without
+	// reading the file. When enabled for the source, skip ffprobe entirely. Codec
+	// details are left blank (the player transcodes; a later full scan can fill
+	// them) but the file is otherwise complete so it isn't re-probed every scan.
+	if meta, ok, _ := mediapath.FastMeta(base.Path); ok {
+		interactive := false
+		if _, err := fs.Lstat(GetFunscriptPath(base.Path)); err == nil {
+			interactive = true
+		}
+		return &models.VideoFile{
+			BaseFile:    base,
+			Format:      fastContainer(base.Path),
+			VideoCodec:  "",
+			AudioCodec:  "",
+			Width:       int(meta.Width),
+			Height:      int(meta.Height),
+			Duration:    float64(meta.DurationMS) / 1000.0,
+			FrameRate:   0,
+			BitRate:     0,
+			Interactive: interactive,
+		}, nil
 	}
 
 	probe := d.FFProbe

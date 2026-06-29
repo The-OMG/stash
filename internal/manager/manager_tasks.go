@@ -61,6 +61,12 @@ func getScanPaths(inputPaths []string) []*config.StashConfig {
 	for _, p := range inputPaths {
 		s := stashPaths.GetStashFromDirPath(p)
 		if s == nil {
+			// allow native Google Drive source paths even though they aren't
+			// configured stash library paths.
+			if instance != nil && instance.IsManaged(p) {
+				ret = append(ret, &config.StashConfig{Path: p})
+				continue
+			}
 			logger.Warnf("%s is not in the configured stash paths", p)
 			continue
 		}

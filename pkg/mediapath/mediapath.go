@@ -82,3 +82,16 @@ func MediaMeta(path string) (Meta, bool, error) {
 	}
 	return MetaResolver(path)
 }
+
+// FastResolver, if set, returns native metadata AND signals the scanner that it
+// may use it INSTEAD of running ffprobe (opt-in per source). ok is false when
+// the file should be probed normally (no fast metadata / fast scan disabled).
+var FastResolver func(path string) (Meta, bool, error)
+
+// FastMeta returns native metadata usable as a full ffprobe substitute.
+func FastMeta(path string) (Meta, bool, error) {
+	if FastResolver == nil {
+		return Meta{}, false, nil
+	}
+	return FastResolver(path)
+}

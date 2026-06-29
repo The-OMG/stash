@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql/handler/lru"
@@ -35,7 +36,8 @@ type ScanJob struct {
 	subscriptions *subscriptionManager
 
 	fileQueue chan file.ScannedFile
-	count     int
+	count     atomic.Int64 // files queued for processing
+	walked    atomic.Int64 // entries visited during the walk (progress display)
 
 	unmatchedCaptionFiles utils.MutexField[[]string]
 }
@@ -59,13 +61,14 @@ func (j *ScanJob) Execute(ctx context.Context, progress *job.Progress) error {
 	c := mgr.Config
 	repo := mgr.Repository
 
-	// Sync native Google Drive sources before walking: a cold full index on
-	// first run, then fast incremental Changes-API polls. For a full scan
-	// (no explicit paths), include the Drive virtual roots so they are walked.
-	mgr.SyncDriveSources(ctx)
+	// For a full scan (no explicit paths), include the Drive virtual roots so
+	// they are walked.
 	if len(input.Paths) == 0 {
 		paths = append(paths, mgr.DriveRoots()...)
 	}
+	// Incrementally sync only the Drive sources actually being scanned (so a
+	// selective scan of one drive doesn't sync all of them before walking).
+	mgr.SyncDriveSourcesForPaths(ctx, paths)
 
 	start := time.Now()
 
@@ -128,7 +131,7 @@ func (j *ScanJob) runJob(ctx context.Context, paths []string, nTasks int, progre
 			return
 		}
 
-		logger.Infof("Finished adding files to queue. %d files queued", j.count)
+		logger.Infof("Finished adding files to queue. %d files queued", j.count.Load())
 	}()
 
 	defer wg.Wait()
@@ -144,19 +147,41 @@ func (j *ScanJob) queueFiles(ctx context.Context, paths []string, progress *job.
 	defer func() {
 		close(j.fileQueue)
 
-		progress.AddTotal(j.count)
+		progress.AddTotal(int(j.count.Load()))
 		progress.Definite()
 	}()
 
+	// Walk in the background so the subtask can show a live count — for huge
+	// trees (and Drive backends) the walk phase is long and was otherwise silent.
 	var err error
-	progress.ExecuteTask("Walking directory tree", func() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
 		for _, p := range paths {
-			err = file.SymWalk(fs, p, j.queueFileFunc(ctx, fs, nil, progress))
-			if err != nil {
+			if werr := file.SymWalk(fs, p, j.queueFileFunc(ctx, fs, nil, progress)); werr != nil {
+				err = werr
 				return
 			}
 		}
-	})
+	}()
+
+	for {
+		var stop bool
+		progress.ExecuteTask(
+			fmt.Sprintf("Walking directory tree — %d entries, %d files queued", j.walked.Load(), j.count.Load()),
+			func() {
+				select {
+				case <-done:
+					stop = true
+				case <-ctx.Done():
+					stop = true
+				case <-time.After(time.Second):
+				}
+			})
+		if stop {
+			break
+		}
+	}
 
 	return err
 }
@@ -171,6 +196,11 @@ func (j *ScanJob) queueFileFunc(ctx context.Context, f models.FS, zipFile *file.
 
 		if err = ctx.Err(); err != nil {
 			return err
+		}
+
+		// progress visibility for long walks (esp. Drive backends)
+		if w := j.walked.Add(1); w%5000 == 0 {
+			logger.Infof("scan: walked %d entries, %d files queued (at %s)", w, j.count.Load(), path)
 		}
 
 		info, err := d.Info()
@@ -265,7 +295,7 @@ func (j *ScanJob) queueFileFunc(ctx context.Context, f models.FS, zipFile *file.
 		logger.Tracef("Queueing file %s for scanning", path)
 		j.fileQueue <- ff
 
-		j.count++
+		j.count.Add(1)
 
 		return nil
 	}

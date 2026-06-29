@@ -357,6 +357,7 @@ func (rs sceneRoutes) VttThumbs(w http.ResponseWriter, r *http.Request) {
 	} else {
 		sceneHash = chi.URLParam(r, "sceneHash")
 	}
+	rs.ensureSprite(r, scene, sceneHash)
 	filepath := manager.GetInstance().Paths.Scene.GetSpriteVttFilePath(sceneHash)
 
 	w.Header().Set("Content-Type", "text/vtt")
@@ -371,9 +372,43 @@ func (rs sceneRoutes) VttSprite(w http.ResponseWriter, r *http.Request) {
 	} else {
 		sceneHash = chi.URLParam(r, "sceneHash")
 	}
+	rs.ensureSprite(r, scene, sceneHash)
 	filepath := manager.GetInstance().Paths.Scene.GetSpriteImageFilePath(sceneHash)
 
 	utils.ServeStaticFile(w, r, filepath)
+}
+
+// ensureSprite lazily generates the scrub sprite + thumbs VTT on first request
+// if missing (e.g. Drive-backed scenes never batch-generated). Best-effort.
+func (rs sceneRoutes) ensureSprite(r *http.Request, scene *models.Scene, sceneHash string) {
+	if sceneHash == "" {
+		return
+	}
+	scenePath := ""
+	if scene != nil {
+		scenePath = scene.Path
+	} else {
+		_ = rs.withReadTxn(r, func(ctx context.Context) error {
+			var found *models.Scene
+			if ss, err := rs.sceneFinder.FindByOSHash(ctx, sceneHash); err == nil && len(ss) > 0 {
+				found = ss[0]
+			} else if ss, err := rs.sceneFinder.FindByChecksum(ctx, sceneHash); err == nil && len(ss) > 0 {
+				found = ss[0]
+			}
+			if found != nil {
+				if err := found.LoadPrimaryFile(ctx, rs.fileGetter); err == nil {
+					scenePath = found.Path
+				}
+			}
+			return nil
+		})
+	}
+	if scenePath == "" {
+		return
+	}
+	if err := manager.GetInstance().EnsureSprite(scenePath, sceneHash); err != nil {
+		logger.Errorf("on-demand sprite for %s: %v", sceneHash, err)
+	}
 }
 
 func (rs sceneRoutes) Funscript(w http.ResponseWriter, r *http.Request) {

@@ -184,6 +184,96 @@ func (s *Source) Sync(ctx context.Context) (SyncStats, error) {
 	return s.incrementalSync(ctx, token)
 }
 
+// SyncFull is the explicit "Sync" action: a full enumeration the first time
+// (so the index/file_count is populated), then incremental change syncs.
+func (s *Source) SyncFull(ctx context.Context, onProgress func(indexed int)) (SyncStats, error) {
+	token, err := s.Index.PageToken()
+	if err != nil {
+		return SyncStats{}, err
+	}
+	// Full-index unless a previous full enumeration COMPLETED (tracked by a flag,
+	// so a partial/interrupted index or a lazy token-only state is retried).
+	done, _ := s.Index.FullIndexDone()
+	if !done || token == "" {
+		return s.FullIndex(ctx, onProgress)
+	}
+	return s.incrementalSync(ctx, token)
+}
+
+// FullIndex enumerates the whole source into the index (so file_count reflects
+// the drive) and marks folders listed. Whole-drive sources use the flat
+// files.list; folder-scoped sources walk from the root. The change token is
+// captured first so edits during the (long) enumeration are caught next sync.
+func (s *Source) FullIndex(ctx context.Context, onProgress func(indexed int)) (SyncStats, error) {
+	svc, err := s.Pool.First(ctx)
+	if err != nil {
+		return SyncStats{}, err
+	}
+	startToken, err := StartPageToken(ctx, svc, s.DriveID)
+	if err != nil {
+		return SyncStats{}, err
+	}
+
+	report := func(n int) {
+		if onProgress != nil {
+			onProgress(n)
+		}
+	}
+
+	stats := SyncStats{Full: true}
+	if s.Index.IsWholeDrive() {
+		// flat enumeration of the whole drive (fewest API calls)
+		err = ListDrive(ctx, svc, s.DriveID, func(batch []Item) error {
+			if e := s.Index.Upsert(batch); e != nil {
+				return e
+			}
+			stats.Added += len(batch)
+			report(stats.Added)
+			return ctx.Err()
+		})
+		if err != nil {
+			return stats, err
+		}
+		if err := s.Index.MarkAllFoldersListed(); err != nil {
+			return stats, err
+		}
+	} else {
+		// scoped: breadth-first walk from the root folder
+		queue := []string{s.Index.RootID()}
+		for len(queue) > 0 {
+			folder := queue[0]
+			queue = queue[1:]
+			if err := ListFolder(ctx, svc, s.DriveID, folder, func(batch []Item) error {
+				if e := s.Index.Upsert(batch); e != nil {
+					return e
+				}
+				stats.Added += len(batch)
+				report(stats.Added)
+				for _, it := range batch {
+					if it.IsFolder {
+						queue = append(queue, it.ID)
+					}
+				}
+				return ctx.Err()
+			}); err != nil {
+				return stats, err
+			}
+			if err := s.Index.MarkListed(folder); err != nil {
+				return stats, err
+			}
+		}
+	}
+
+	if err := s.Index.SetPageToken(startToken); err != nil {
+		return stats, err
+	}
+	if err := s.Index.SetFullIndexDone(); err != nil {
+		return stats, err
+	}
+	stats.Total, _ = s.Index.Count()
+	return stats, nil
+}
+
 // initialSync prepares a brand-new source by capturing the change page token.
 // It deliberately does NOT pre-enumerate the whole drive: the index is
 // populated lazily, folder-by-folder, by DriveFS.ReadDir as the scanner walks,

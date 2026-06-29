@@ -155,6 +155,42 @@ func ListDrive(ctx context.Context, svc *drive.Service, driveID string, cb func(
 	}
 }
 
+// DriveInfo identifies a drive selectable as a source.
+type DriveInfo struct {
+	ID      string // shared-drive id, or "" for My Drive
+	Name    string
+	MyDrive bool
+}
+
+// ListDrives returns the shared (team) drives accessible to the authenticated
+// principal. Callers may prepend a My Drive entry.
+func ListDrives(ctx context.Context, svc *drive.Service) ([]DriveInfo, error) {
+	var out []DriveInfo
+	pageToken := ""
+	for {
+		var resp *drive.DriveList
+		err := retryable(func() error {
+			call := svc.Drives.List().PageSize(100).Fields("nextPageToken,drives(id,name)")
+			if pageToken != "" {
+				call = call.PageToken(pageToken)
+			}
+			var e error
+			resp, e = call.Context(ctx).Do()
+			return e
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range resp.Drives {
+			out = append(out, DriveInfo{ID: d.Id, Name: d.Name})
+		}
+		if resp.NextPageToken == "" {
+			return out, nil
+		}
+		pageToken = resp.NextPageToken
+	}
+}
+
 // ThumbnailURL fetches a fresh (short-lived) thumbnail link for a file. Drive
 // generates thumbnails for images and most videos; the link must be fetched on
 // demand because it expires.

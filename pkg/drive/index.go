@@ -155,6 +155,69 @@ func (i *Index) SetTrashedByID(id string, trashed bool) error {
 	return err
 }
 
+// IndexFile is a file entry paired with its root-relative path.
+type IndexFile struct {
+	RelPath string
+	Size    int64
+}
+
+// AllFiles returns every non-folder, non-trashed file with its path relative to
+// the source root (reconstructed in memory). Items whose parent chain doesn't
+// reach the root (outside a folder-scoped source) are skipped.
+func (i *Index) AllFiles() ([]IndexFile, error) {
+	rows, err := i.db.Query(`SELECT id, name, parent, size, is_folder, trashed FROM items`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type node struct {
+		name, parent  string
+		size          int64
+		folder, trash bool
+	}
+	nodes := make(map[string]node)
+	for rows.Next() {
+		var id, name, parent string
+		var size int64
+		var folder, trash int
+		if err := rows.Scan(&id, &name, &parent, &size, &folder, &trash); err != nil {
+			return nil, err
+		}
+		nodes[id] = node{name: name, parent: parent, size: size, folder: folder == 1, trash: trash == 1}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var out []IndexFile
+	for _, n := range nodes {
+		if n.folder || n.trash {
+			continue
+		}
+		parts := []string{n.name}
+		p := n.parent
+		ok := true
+		for p != "" && p != i.rootID {
+			pn, exists := nodes[p]
+			if !exists {
+				ok = false
+				break
+			}
+			parts = append(parts, pn.name)
+			p = pn.parent
+		}
+		if !ok {
+			continue
+		}
+		for l, r := 0, len(parts)-1; l < r; l, r = l+1, r-1 {
+			parts[l], parts[r] = parts[r], parts[l]
+		}
+		out = append(out, IndexFile{RelPath: strings.Join(parts, "/"), Size: n.size})
+	}
+	return out, nil
+}
+
 // Count returns the number of non-folder, non-trashed files in the index.
 func (i *Index) Count() (int, error) {
 	var n int
@@ -256,6 +319,24 @@ func (i *Index) MarkListed(folderID string) error {
 	return err
 }
 
+// MarkAllFoldersListed marks every folder in the index as listed (used after a
+// full enumeration, so a subsequent scan walk doesn't re-list folder-by-folder).
+func (i *Index) MarkAllFoldersListed() error {
+	_, err := i.db.Exec(`INSERT OR IGNORE INTO listed_folders (id) SELECT id FROM items WHERE is_folder = 1`)
+	if err != nil {
+		return err
+	}
+	// also mark the synthetic root
+	_, err = i.db.Exec(`INSERT OR IGNORE INTO listed_folders (id) VALUES (?)`, i.rootID)
+	return err
+}
+
+// RootID returns the tree root (scoped folder id, or drive id for a whole drive).
+func (i *Index) RootID() string { return i.rootID }
+
+// IsWholeDrive reports whether the source spans the whole drive (not folder-scoped).
+func (i *Index) IsWholeDrive() bool { return i.rootID == i.driveID }
+
 // SetMeta stores a metadata key (e.g. the change page token).
 func (i *Index) SetMeta(key, value string) error {
 	_, err := i.db.Exec(
@@ -276,6 +357,18 @@ func (i *Index) GetMeta(key string) (string, bool, error) {
 	}
 	return v, true, nil
 }
+
+const fullIndexKey = "full_index_done"
+
+// FullIndexDone reports whether a full enumeration has completed (set only by
+// FullIndex, so an interrupted enumeration is correctly retried).
+func (i *Index) FullIndexDone() (bool, error) {
+	v, _, err := i.GetMeta(fullIndexKey)
+	return v == "1", err
+}
+
+// SetFullIndexDone marks the full enumeration complete.
+func (i *Index) SetFullIndexDone() error { return i.SetMeta(fullIndexKey, "1") }
 
 const pageTokenKey = "change_page_token"
 

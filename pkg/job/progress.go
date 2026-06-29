@@ -163,6 +163,15 @@ func (p *Progress) removeTask(t *task) {
 	}
 }
 
+// SetDescription updates the job's description. Useful to bake a final result
+// summary into the job so it persists on the Tasks page after completion (the
+// description is captured by statusCopy when the job is removed).
+func (p *Progress) SetDescription(s string) {
+	if p.updater != nil {
+		p.updater.setDescription(s)
+	}
+}
+
 // ExecuteTask executes a task as part of a job. The description is used to
 // populate the Details slice in the parent Job.
 func (p *Progress) ExecuteTask(description string, fn func()) {

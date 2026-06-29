@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/stashapp/stash/internal/manager"
 	"github.com/stashapp/stash/internal/manager/config"
 	"github.com/stashapp/stash/pkg/fsutil"
 	"github.com/stashapp/stash/pkg/models"
@@ -28,6 +29,18 @@ func (r *queryResolver) Directory(ctx context.Context, path, locale *string) (*D
 		dirPath = *path
 	}
 	currentDir := getDir(dirPath)
+
+	// Native Google Drive virtual paths are listed from the index, not the OS.
+	if dirs, isDrive, derr := manager.GetInstance().DriveListDirs(currentDir); isDrive {
+		if derr != nil {
+			return directory, derr
+		}
+		directory.Path = currentDir
+		directory.Parent = getParent(currentDir)
+		directory.Directories = dirs
+		return directory, nil
+	}
+
 	directories, err := listDir(col, currentDir)
 	if err != nil {
 		return directory, err

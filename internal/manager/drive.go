@@ -9,11 +9,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/stashapp/stash/pkg/drive"
 	"github.com/stashapp/stash/pkg/file"
+	"github.com/stashapp/stash/pkg/job"
 	"github.com/stashapp/stash/pkg/logger"
 	"github.com/stashapp/stash/pkg/mediapath"
 	"google.golang.org/api/googleapi"
@@ -43,6 +47,7 @@ type driveSourceConfig struct {
 	Scope        string `json:"scope"`          // optional oauth scope (default full drive)
 	CacheDir     string `json:"cache_dir"`      // optional media cache dir (default under cache path)
 	CacheBytes   int64  `json:"cache_bytes"`    // optional cache size cap (default 50 GiB)
+	FastScan     bool   `json:"fast_scan"`      // use Drive duration/dims, skip ffprobe (no codec detail)
 
 	// auth: defaults to service-account (keys_path). Alternatively OAuth, or
 	// import everything (token + ids) from an existing rclone remote.
@@ -69,7 +74,14 @@ func (s *Manager) buildSourceAuth(ctx context.Context, sc *driveSourceConfig) (d
 		}
 		return r.Authenticator(ctx, sc.Scope)
 	}
-	if sc.AuthType == "oauth" || sc.Token != "" {
+	if sc.AuthType == "oauth" {
+		// pasted token (rclone-style) or the connected Google account
+		if sc.Token != "" {
+			return drive.NewOAuthSourceFromRcloneToken(ctx, sc.Token, sc.ClientID, sc.ClientSecret, sc.Scope)
+		}
+		return s.googleConnectedAuth(ctx)
+	}
+	if sc.Token != "" {
 		return drive.NewOAuthSourceFromRcloneToken(ctx, sc.Token, sc.ClientID, sc.ClientSecret, sc.Scope)
 	}
 	return drive.NewSAPool(sc.KeysPath, sc.Scope)
@@ -201,9 +213,28 @@ func (s *Manager) RefreshDriveSources(ctx context.Context) {
 	mediapath.HeadReader = s.resolveHead
 	mediapath.ThumbResolver = s.resolveThumb
 	mediapath.MetaResolver = s.resolveMeta
+	mediapath.FastResolver = s.resolveFastMeta
 
 	// route deletion of Drive-backed files to the drive's trash (reversible).
 	file.DriveTrasher = s
+}
+
+// resolveFastMeta returns Drive metadata usable as a full ffprobe substitute,
+// but only when the owning source has fast scan enabled AND Drive has populated
+// both dimensions and duration. ok is false otherwise (probe normally).
+func (s *Manager) resolveFastMeta(path string) (mediapath.Meta, bool, error) {
+	ms, rel, ok := s.driveSourceForPath(path)
+	if !ok || !ms.cfg.FastScan {
+		return mediapath.Meta{}, false, nil
+	}
+	it, found, err := ms.source.Index.LookupPath(rel)
+	if err != nil || !found {
+		return mediapath.Meta{}, false, err
+	}
+	if it.Width <= 0 || it.Height <= 0 || it.DurationMS <= 0 {
+		return mediapath.Meta{}, false, nil
+	}
+	return mediapath.Meta{Width: it.Width, Height: it.Height, DurationMS: it.DurationMS}, true, nil
 }
 
 // resolveMeta returns Drive's native dimensions/duration for a path so the
@@ -295,6 +326,46 @@ func (s *Manager) driveSourceList() []*managedDriveSource {
 	s.driveMu.RLock()
 	defer s.driveMu.RUnlock()
 	return s.driveSources
+}
+
+// DriveListDirs lists the child folder paths for a virtual Drive path, so the
+// directory picker can browse the Drive tree. isDrive is true when path is the
+// Drive root prefix or under a mounted source (so the caller skips the OS
+// listing). Folders come from the local index (run a Sync to populate deeper).
+func (s *Manager) DriveListDirs(path string) (dirs []string, isDrive bool, err error) {
+	clean := filepath.Clean(path)
+
+	// the bare prefix lists all mounted source roots
+	if clean == driveVirtualRoot {
+		for _, ms := range s.driveSourceList() {
+			dirs = append(dirs, ms.root)
+		}
+		sort.Strings(dirs)
+		return dirs, true, nil
+	}
+
+	ms, rel, ok := s.driveSourceForPath(clean)
+	if !ok {
+		return nil, false, nil // not a Drive path — caller uses the OS listing
+	}
+	it, found, err := ms.source.Index.LookupPath(rel)
+	if err != nil {
+		return nil, true, err
+	}
+	if !found {
+		return []string{}, true, nil
+	}
+	children, err := ms.source.Index.Children(it.ID)
+	if err != nil {
+		return nil, true, err
+	}
+	for _, c := range children {
+		if c.IsFolder {
+			dirs = append(dirs, filepath.Join(ms.root, rel, c.Name))
+		}
+	}
+	sort.Strings(dirs)
+	return dirs, true, nil
 }
 
 // driveSourceForPath returns the mounted source owning path and the
@@ -478,6 +549,7 @@ type DriveSourceStatus struct {
 	KeysPath     string
 	Scope        string
 	CacheDir     string
+	Path         string // virtual library root, e.g. /__gdrive__/<id>
 	FileCount    int
 	Mounted      bool
 }
@@ -497,6 +569,7 @@ type DriveSourceParams struct {
 	ClientSecret string
 	Token        string
 	RcloneRemote string
+	FastScan     bool
 }
 
 // DriveFolderInfo is a folder returned by the source picker.
@@ -573,6 +646,7 @@ func (s *Manager) ListDriveSources() []DriveSourceStatus {
 		st := DriveSourceStatus{
 			ID: sc.ID, Name: sc.Name, DriveID: sc.DriveID, RootFolderID: sc.RootFolderID,
 			KeysPath: sc.KeysPath, Scope: sc.Scope, CacheDir: sc.CacheDir,
+			Path: filepath.Join(driveVirtualRoot, sc.ID),
 		}
 		if ms, ok := mounted[sc.ID]; ok {
 			st.Mounted = true
@@ -609,7 +683,7 @@ func (s *Manager) AddDriveSource(ctx context.Context, in DriveSourceParams) erro
 		ID: in.ID, Name: in.Name, DriveID: in.DriveID, RootFolderID: in.RootFolderID,
 		KeysPath: in.KeysPath, Scope: in.Scope, CacheDir: in.CacheDir, CacheBytes: in.CacheBytes,
 		AuthType: in.AuthType, ClientID: in.ClientID, ClientSecret: in.ClientSecret,
-		Token: in.Token, RcloneRemote: in.RcloneRemote,
+		Token: in.Token, RcloneRemote: in.RcloneRemote, FastScan: in.FastScan,
 	}
 
 	// validate auth + drive access up front so the UI gets immediate feedback.
@@ -680,19 +754,83 @@ func (s *Manager) RemoveDriveSource(ctx context.Context, id string) error {
 	return nil
 }
 
-// SyncDriveSourceByID triggers a background index sync for one mounted source.
-func (s *Manager) SyncDriveSourceByID(id string) error {
-	for _, ms := range s.driveSourceList() {
-		if ms.cfg.ID == id {
-			go func(m *managedDriveSource) {
-				if _, err := m.source.Sync(context.Background()); err != nil {
-					logger.Errorf("drive[%s]: background sync: %v", m.cfg.ID, err)
-				}
-			}(ms)
+// driveSyncJob runs a source's index sync as a tracked JobManager job (so it
+// shows in Settings > Tasks with progress and is cancellable).
+type driveSyncJob struct {
+	ms *managedDriveSource
+}
+
+func (j *driveSyncJob) Execute(ctx context.Context, progress *job.Progress) error {
+	progress.Indefinite()
+	logger.Infof("drive[%s]: sync started", j.ms.cfg.ID)
+
+	// Run the sync in the background; surface the running count both as a
+	// once-per-second updating job detail line and as throttled server logs.
+	var indexed, lastLog int64
+	done := make(chan error, 1)
+	go func() {
+		_, err := j.ms.source.SyncFull(ctx, func(n int) {
+			atomic.StoreInt64(&indexed, int64(n))
+			if int64(n)-atomic.LoadInt64(&lastLog) >= 5000 {
+				atomic.StoreInt64(&lastLog, int64(n))
+				logger.Infof("drive[%s]: indexing… %d items", j.ms.cfg.ID, n)
+			}
+		})
+		done <- err
+	}()
+
+	for {
+		var (
+			loopErr error
+			stop    bool
+		)
+		n := atomic.LoadInt64(&indexed)
+		progress.ExecuteTask(fmt.Sprintf("Indexing %s from Google Drive — %d items", j.ms.cfg.Name, n), func() {
+			select {
+			case err := <-done:
+				loopErr, stop = err, true
+			case <-ctx.Done():
+				loopErr, stop = ctx.Err(), true
+			case <-time.After(time.Second):
+			}
+		})
+		if stop {
+			if loopErr != nil {
+				return fmt.Errorf("drive[%s] sync: %w", j.ms.cfg.ID, loopErr)
+			}
+			logger.Infof("drive[%s]: sync complete (%d items indexed)", j.ms.cfg.ID, atomic.LoadInt64(&indexed))
 			return nil
 		}
 	}
-	return fmt.Errorf("no mounted drive source with id %q", id)
+}
+
+// SyncDriveSourceByID queues an index sync for one mounted source as a tracked
+// job, returning the job id.
+func (s *Manager) SyncDriveSourceByID(ctx context.Context, id string) (int, error) {
+	for _, ms := range s.driveSourceList() {
+		if ms.cfg.ID == id {
+			jobID := s.JobManager.Add(ctx, fmt.Sprintf("Syncing Google Drive: %s", ms.cfg.Name), &driveSyncJob{ms: ms})
+			return jobID, nil
+		}
+	}
+	return 0, fmt.Errorf("no mounted drive source with id %q", id)
+}
+
+// SyncDriveSourcesForPaths incrementally syncs only the Drive sources that own
+// one of the given scan paths (deduped), so a selective scan doesn't sync every
+// mounted drive before walking.
+func (s *Manager) SyncDriveSourcesForPaths(ctx context.Context, paths []string) {
+	seen := map[string]bool{}
+	for _, p := range paths {
+		ms, _, ok := s.driveSourceForPath(p)
+		if !ok || seen[ms.cfg.ID] {
+			continue
+		}
+		seen[ms.cfg.ID] = true
+		if _, err := ms.source.Sync(ctx); err != nil {
+			logger.Errorf("drive[%s]: scan-time sync: %v", ms.cfg.ID, err)
+		}
+	}
 }
 
 // SyncDriveSources refreshes each Drive index from the Drive API: a cold full

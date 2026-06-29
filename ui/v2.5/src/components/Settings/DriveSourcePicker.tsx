@@ -1,9 +1,18 @@
 import React, { useMemo, useState } from "react";
-import { Breadcrumb, Button, Form, ListGroup, Modal, Spinner } from "react-bootstrap";
 import {
-  useRcloneRemotesQuery,
+  Breadcrumb,
+  Button,
+  Form,
+  ListGroup,
+  Modal,
+  Spinner,
+} from "react-bootstrap";
+import Select from "react-select";
+import {
   useDriveBrowseQuery,
   useAddDriveSourceMutation,
+  useGoogleAuthStatusQuery,
+  useGoogleDrivesQuery,
   DriveBrowseInput,
 } from "src/core/generated-graphql";
 import { useToast } from "src/hooks/Toast";
@@ -15,40 +24,72 @@ interface IProps {
 }
 
 type Crumb = { id: string; name: string };
+type AuthMode = "oauth" | "sa";
 
 // Builds the auth/source portion of the input shared by browse + add.
-function authInput(remote: string, keysPath: string, driveId: string): Partial<DriveBrowseInput> {
-  if (remote) return { rclone_remote: remote };
+function authInput(
+  mode: AuthMode,
+  driveId: string,
+  keysPath: string
+): Partial<DriveBrowseInput> {
+  if (mode === "oauth") return { auth_type: "oauth", drive_id: driveId || null };
   return { keys_path: keysPath || null, drive_id: driveId || null };
 }
 
-export const DriveSourcePicker: React.FC<IProps> = ({ show, onClose, onAdded }) => {
+export const DriveSourcePicker: React.FC<IProps> = ({
+  show,
+  onClose,
+  onAdded,
+}) => {
   const Toast = useToast();
-  const { data: remotesData } = useRcloneRemotesQuery();
   const [addDriveSource] = useAddDriveSourceMutation();
 
-  // auth selection
-  const [remote, setRemote] = useState("");
+  const { data: authStatus } = useGoogleAuthStatusQuery({ skip: !show });
+  const connected = authStatus?.googleAuthStatus.connected ?? false;
+
+  const [mode, setMode] = useState<AuthMode>("oauth");
+  const [driveId, setDriveId] = useState(""); // selected shared drive (oauth) or typed (sa)
+  const [driveName, setDriveName] = useState("");
   const [keysPath, setKeysPath] = useState("");
-  const [driveId, setDriveId] = useState("");
 
   // navigation
-  const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: "", name: "(drive root)" }]);
+  const [crumbs, setCrumbs] = useState<Crumb[]>([
+    { id: "", name: "(drive root)" },
+  ]);
   const current = crumbs[crumbs.length - 1];
 
   // new source
   const [id, setId] = useState("");
   const [name, setName] = useState("");
+  const [fastScan, setFastScan] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const ready = !!remote || (!!keysPath && !!driveId);
+  const { data: drivesData, loading: drivesLoading } = useGoogleDrivesQuery({
+    skip: mode !== "oauth" || !connected || !show,
+    fetchPolicy: "network-only",
+  });
+  // My Drive (personal) as a source needs engine support; list shared drives only.
+  const driveOptions = useMemo(
+    () =>
+      (drivesData?.googleDrives ?? [])
+        .filter((d) => !d.my_drive)
+        .map((d) => ({ value: d.id, label: d.name })),
+    [drivesData]
+  );
 
-  const auth = useMemo(() => authInput(remote, keysPath, driveId), [remote, keysPath, driveId]);
+  const ready =
+    mode === "oauth" ? !!driveId : !!keysPath && !!driveId;
+  const auth = useMemo(
+    () => authInput(mode, driveId, keysPath),
+    [mode, driveId, keysPath]
+  );
 
   const { data: browse, loading: browsing, error } = useDriveBrowseQuery({
     skip: !ready || !show,
     fetchPolicy: "network-only",
-    variables: { input: { ...auth, parent_id: current.id || null } as DriveBrowseInput },
+    variables: {
+      input: { ...auth, parent_id: current.id || null } as DriveBrowseInput,
+    },
   });
 
   function resetNav() {
@@ -62,9 +103,10 @@ export const DriveSourcePicker: React.FC<IProps> = ({ show, onClose, onAdded }) 
         variables: {
           input: {
             id,
-            name: name || id,
+            name: name || driveName || id,
             ...auth,
             root_folder_id: current.id || null,
+            fast_scan: fastScan,
           },
         },
       });
@@ -85,29 +127,64 @@ export const DriveSourcePicker: React.FC<IProps> = ({ show, onClose, onAdded }) 
       </Modal.Header>
       <Modal.Body>
         <Form.Group>
-          <Form.Label>Authenticate via</Form.Label>
-          <Form.Control
-            as="select"
-            value={remote}
-            onChange={(e) => {
-              setRemote(e.currentTarget.value);
-              resetNav();
-            }}
-          >
-            <option value="">— service account / manual —</option>
-            {(remotesData?.rcloneRemotes ?? []).map((rn) => (
-              <option key={rn} value={rn}>
-                rclone remote: {rn}
-              </option>
-            ))}
-          </Form.Control>
-          <Form.Text className="text-muted">
-            Pick an existing rclone Drive remote (token + drive id imported automatically), or
-            choose service account and enter the details below.
-          </Form.Text>
+          <Form.Label>Source</Form.Label>
+          <div className="btn-group d-block mb-2">
+            <Button
+              variant={mode === "oauth" ? "primary" : "secondary"}
+              size="sm"
+              onClick={() => {
+                setMode("oauth");
+                setDriveId("");
+                resetNav();
+              }}
+            >
+              Connected Google account
+            </Button>
+            <Button
+              variant={mode === "sa" ? "primary" : "secondary"}
+              size="sm"
+              onClick={() => {
+                setMode("sa");
+                setDriveId("");
+                resetNav();
+              }}
+            >
+              Service account (advanced)
+            </Button>
+          </div>
         </Form.Group>
 
-        {!remote && (
+        {mode === "oauth" && !connected && (
+          <div className="text-warning">
+            No Google account is connected. Use <b>Connect Google Drive</b> in
+            the Google Drive settings first, or switch to Service account.
+          </div>
+        )}
+
+        {mode === "oauth" && connected && (
+          <Form.Group>
+            <Form.Label>Drive</Form.Label>
+            <Select
+              classNamePrefix="react-select"
+              isSearchable
+              isLoading={drivesLoading}
+              placeholder="Select a shared drive…"
+              options={driveOptions}
+              value={driveOptions.find((o) => o.value === driveId) ?? null}
+              onChange={(opt) => {
+                setDriveId(opt?.value ?? "");
+                setDriveName(opt?.label ?? "");
+                if (!id && opt) setId(opt.label.replace(/\s+/g, "").toLowerCase());
+                resetNav();
+              }}
+            />
+            <Form.Text className="text-muted">
+              Shared drives accessible to your connected Google account.
+            </Form.Text>
+          </Form.Group>
+        )}
+
+        {mode === "sa" && (
           <>
             <Form.Group>
               <Form.Label>Service-account JSON (file or directory)</Form.Label>
@@ -137,6 +214,9 @@ export const DriveSourcePicker: React.FC<IProps> = ({ show, onClose, onAdded }) 
         {ready && (
           <>
             <hr />
+            <p className="text-muted">
+              Pick a sub-folder to scope the source, or add the whole drive.
+            </p>
             <Breadcrumb>
               {crumbs.map((c, i) => (
                 <Breadcrumb.Item
@@ -153,7 +233,10 @@ export const DriveSourcePicker: React.FC<IProps> = ({ show, onClose, onAdded }) 
             {browsing ? (
               <Spinner animation="border" role="status" />
             ) : (
-              <ListGroup className="drive-folder-list" style={{ maxHeight: 280, overflowY: "auto" }}>
+              <ListGroup
+                className="drive-folder-list"
+                style={{ maxHeight: 280, overflowY: "auto" }}
+              >
                 {(browse?.driveBrowse ?? []).length === 0 && (
                   <ListGroup.Item disabled>No subfolders here.</ListGroup.Item>
                 )}
@@ -161,7 +244,9 @@ export const DriveSourcePicker: React.FC<IProps> = ({ show, onClose, onAdded }) 
                   <ListGroup.Item
                     key={f.id}
                     action
-                    onClick={() => setCrumbs([...crumbs, { id: f.id, name: f.name }])}
+                    onClick={() =>
+                      setCrumbs([...crumbs, { id: f.id, name: f.name }])
+                    }
                   >
                     📁 {f.name}
                   </ListGroup.Item>
@@ -171,15 +256,33 @@ export const DriveSourcePicker: React.FC<IProps> = ({ show, onClose, onAdded }) 
 
             <hr />
             <p>
-              Library root: <code>{current.id ? current.name : "whole drive"}</code>
+              Library root:{" "}
+              <code>{current.id ? current.name : "whole drive"}</code>
             </p>
             <Form.Group>
               <Form.Label>Source id</Form.Label>
-              <Form.Control value={id} placeholder="tv" onChange={(e) => setId(e.currentTarget.value)} />
+              <Form.Control
+                value={id}
+                placeholder="tv"
+                onChange={(e) => setId(e.currentTarget.value)}
+              />
             </Form.Group>
             <Form.Group>
               <Form.Label>Display name</Form.Label>
-              <Form.Control value={name} placeholder="TV" onChange={(e) => setName(e.currentTarget.value)} />
+              <Form.Control
+                value={name}
+                placeholder={driveName || "TV"}
+                onChange={(e) => setName(e.currentTarget.value)}
+              />
+            </Form.Group>
+            <Form.Group>
+              <Form.Check
+                type="checkbox"
+                id="drive-fast-scan"
+                label="Fast scan — use Drive's duration & resolution and skip ffprobe (much faster; no codec/bitrate detail, fills on first play)"
+                checked={fastScan}
+                onChange={(e) => setFastScan(e.currentTarget.checked)}
+              />
             </Form.Group>
           </>
         )}

@@ -254,6 +254,12 @@ type Query {
   rcloneRemotes: [String!]!
   "Lists folders under a drive/folder for the Drive source picker"
   driveBrowse(input: DriveBrowseInput!): [DriveFolder!]!
+  "Google OAuth connection status (for the Connect button)"
+  googleAuthStatus: GoogleAuthStatus!
+  "My Drive + shared drives for the connected Google account"
+  googleDrives: [GoogleDrive!]!
+  "Status/result of the most recent Drive library migration (poll while running)"
+  driveMigrateStatus: MigrateDriveStatus!
 
   # System status
   systemStatus: SystemStatus!
@@ -460,6 +466,12 @@ type Mutation {
   removeDriveSource(id: String!): Boolean!
   "Trigger an index sync (cold full or incremental) for a Drive source in the background"
   syncDriveSource(id: String!): Boolean!
+  "Set the per-instance Google OAuth client (when no built-in client is shipped)"
+  setGoogleOAuthClient(input: SetGoogleOAuthClientInput!): Boolean!
+  "Disconnect the Google account; clear_client also clears the OAuth client creds"
+  disconnectGoogleDrive(clear_client: Boolean): Boolean!
+  "Repoint existing DB files onto a Drive source by relative path (no re-scan/re-hash)"
+  migrateDriveByPath(input: MigrateDriveByPathInput!): MigrateDriveResult!
 
   "overwrites the entire plugin configuration for the given plugin"
   configurePlugin(plugin_id: ID!, input: Map!): Map!

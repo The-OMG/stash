@@ -230,6 +230,14 @@ func Initialize() (*Server, error) {
 	r.Get(loginEndpoint, handleLogin())
 	r.Post(loginEndpoint, handleLoginPost())
 	r.Get(logoutEndpoint, handleLogout())
+
+	// Google Drive OAuth (consent + callback)
+	r.Get("/oauth/google/login", func(w http.ResponseWriter, r *http.Request) {
+		manager.GetInstance().HandleGoogleOAuthLogin(w, r)
+	})
+	r.Get("/oauth/google/callback", func(w http.ResponseWriter, r *http.Request) {
+		manager.GetInstance().HandleGoogleOAuthCallback(w, r)
+	})
 	r.Get(loginLocaleEndpoint, handleLoginLocale(cfg))
 	r.HandleFunc(loginEndpoint+"/*", func(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = strings.TrimPrefix(r.URL.Path, loginEndpoint)

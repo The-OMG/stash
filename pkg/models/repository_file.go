@@ -16,6 +16,9 @@ type FileFinder interface {
 	FindAllByPath(ctx context.Context, path string, caseSensitive bool) ([]File, error)
 	FindAllInPaths(ctx context.Context, p []string, includeZipContents bool, limit, offset int) ([]File, error)
 	FindByPath(ctx context.Context, path string, caseSensitive bool) (File, error)
+	// FindPathSizes returns full path -> size for files under the given roots
+	// (lightweight; no model/fingerprint loading).
+	FindPathSizes(ctx context.Context, roots []string) (map[string]int64, error)
 	FindByFingerprint(ctx context.Context, fp Fingerprint) ([]File, error)
 	FindByZipFileID(ctx context.Context, zipFileID FileID) ([]File, error)
 	FindByFileInfo(ctx context.Context, info fs.FileInfo, size int64) ([]File, error)

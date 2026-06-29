@@ -19,3 +19,22 @@ mutation RemoveDriveSource($id: String!) {
 mutation SyncDriveSource($id: String!) {
   syncDriveSource(id: $id)
 }
+
+mutation SetGoogleOAuthClient($input: SetGoogleOAuthClientInput!) {
+  setGoogleOAuthClient(input: $input)
+}
+
+mutation DisconnectGoogleDrive($clearClient: Boolean) {
+  disconnectGoogleDrive(clear_client: $clearClient)
+}
+
+mutation MigrateDriveByPath($input: MigrateDriveByPathInput!) {
+  migrateDriveByPath(input: $input) {
+    candidates
+    migrated
+    not_in_db
+    size_mismatch
+    collision
+    dry_run
+  }
+}

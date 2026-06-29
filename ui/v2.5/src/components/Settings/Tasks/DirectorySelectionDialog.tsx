@@ -10,6 +10,7 @@ import { Icon } from "src/components/Shared/Icon";
 import { ModalComponent } from "src/components/Shared/Modal";
 import { FolderSelect } from "src/components/Shared/FolderSelect/FolderSelect";
 import { useConfigurationContext } from "src/hooks/Config";
+import { useDriveSourcesQuery } from "src/core/generated-graphql";
 
 interface IDirectorySelectionDialogProps {
   animation?: boolean;
@@ -30,7 +31,13 @@ export const DirectorySelectionDialog: React.FC<
   const intl = useIntl();
   const { configuration } = useConfigurationContext();
 
-  const libraryPaths = configuration?.general.stashes.map((s) => s.path);
+  const { data: driveData } = useDriveSourcesQuery();
+  // configured local library paths + native Google Drive source roots, so Drive
+  // sources are selectable for a selective scan/generate.
+  const libraryPaths = [
+    ...(configuration?.general.stashes.map((s) => s.path) ?? []),
+    ...(driveData?.driveSources.map((s) => s.path) ?? []),
+  ];
 
   const [paths, setPaths] = useState<string[]>(initialPaths);
   const [currentDirectory, setCurrentDirectory] = useState<string>("");

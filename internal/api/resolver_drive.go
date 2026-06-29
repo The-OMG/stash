@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"time"
 
 	"github.com/stashapp/stash/internal/manager"
 )
@@ -14,6 +15,7 @@ func driveSourceToGQL(st manager.DriveSourceStatus) *DriveSource {
 		KeysPath:  st.KeysPath,
 		FileCount: st.FileCount,
 		Mounted:   st.Mounted,
+		Path:      st.Path,
 	}
 	if st.RootFolderID != "" {
 		r := st.RootFolderID
@@ -41,6 +43,79 @@ func (r *queryResolver) DriveSources(ctx context.Context) ([]*DriveSource, error
 
 func (r *queryResolver) RcloneRemotes(ctx context.Context) ([]string, error) {
 	return manager.GetInstance().RcloneRemotes()
+}
+
+func (r *queryResolver) GoogleAuthStatus(ctx context.Context) (*GoogleAuthStatus, error) {
+	st := manager.GetInstance().GoogleAuthStatus("")
+	return &GoogleAuthStatus{Connected: st.Connected, ClientConfigured: st.ClientConfigured}, nil
+}
+
+func (r *queryResolver) GoogleDrives(ctx context.Context) ([]*GoogleDrive, error) {
+	drives, err := manager.GetInstance().ListGoogleDrives(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*GoogleDrive, 0, len(drives))
+	for _, d := range drives {
+		out = append(out, &GoogleDrive{ID: d.ID, Name: d.Name, MyDrive: d.MyDrive})
+	}
+	return out, nil
+}
+
+func (r *mutationResolver) SetGoogleOAuthClient(ctx context.Context, input SetGoogleOAuthClientInput) (bool, error) {
+	if err := manager.GetInstance().SetGoogleOAuthClient(input.ClientID, input.ClientSecret); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *mutationResolver) DisconnectGoogleDrive(ctx context.Context, clearClient *bool) (bool, error) {
+	clear := false
+	if clearClient != nil {
+		clear = *clearClient
+	}
+	if err := manager.GetInstance().DisconnectGoogle(clear); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *mutationResolver) MigrateDriveByPath(ctx context.Context, input MigrateDriveByPathInput) (*MigrateDriveResult, error) {
+	requireSize := true
+	if input.RequireSize != nil {
+		requireSize = *input.RequireSize
+	}
+	dryRun := false
+	if input.DryRun != nil {
+		dryRun = *input.DryRun
+	}
+	// Both dry-run (preview) and real run execute as background jobs so they show
+	// on the Tasks page, survive navigation, and don't time out the request.
+	// Results are read back via driveMigrateStatus.
+	manager.GetInstance().MigrateDriveByPathJob(ctx, input.Prefix, input.DriveID, requireSize, dryRun)
+	return &MigrateDriveResult{DryRun: dryRun}, nil
+}
+
+func (r *queryResolver) DriveMigrateStatus(ctx context.Context) (*MigrateDriveStatus, error) {
+	st := manager.GetInstance().GetMigrateStatus()
+	out := &MigrateDriveStatus{
+		Running:      st.Running,
+		DryRun:       st.DryRun,
+		Candidates:   st.Stats.Candidates,
+		Migrated:     st.Stats.Migrated,
+		NotInDb:      st.Stats.NotInDB,
+		SizeMismatch: st.Stats.SizeMismatch,
+		Collision:    st.Stats.Collision,
+	}
+	if st.DriveID != "" {
+		d := st.DriveID
+		out.DriveID = &d
+	}
+	if st.FinishedAt != nil {
+		t := st.FinishedAt.Format(time.RFC3339)
+		out.FinishedAt = &t
+	}
+	return out, nil
 }
 
 func deref(s *string) string {
@@ -90,6 +165,9 @@ func (r *mutationResolver) AddDriveSource(ctx context.Context, input AddDriveSou
 	if input.CacheBytes != nil {
 		params.CacheBytes = *input.CacheBytes
 	}
+	if input.FastScan != nil {
+		params.FastScan = *input.FastScan
+	}
 
 	if err := manager.GetInstance().AddDriveSource(ctx, params); err != nil {
 		return nil, err
@@ -114,7 +192,7 @@ func (r *mutationResolver) RemoveDriveSource(ctx context.Context, id string) (bo
 }
 
 func (r *mutationResolver) SyncDriveSource(ctx context.Context, id string) (bool, error) {
-	if err := manager.GetInstance().SyncDriveSourceByID(id); err != nil {
+	if _, err := manager.GetInstance().SyncDriveSourceByID(ctx, id); err != nil {
 		return false, err
 	}
 	return true, nil

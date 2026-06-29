@@ -392,6 +392,13 @@ func (u *updater) notifyUpdate() {
 	u.updateTimer = nil
 }
 
+func (u *updater) setDescription(s string) {
+	u.m.mutex.Lock()
+	defer u.m.mutex.Unlock()
+	u.job.Description = s
+	u.m.notifyJobUpdate(u.job)
+}
+
 func (u *updater) updateProgress(progress float64, details []string) {
 	u.m.mutex.Lock()
 	defer u.m.mutex.Unlock()

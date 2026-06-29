@@ -625,6 +625,40 @@ func (qb *FileStore) find(ctx context.Context, id models.FileID) (models.File, e
 }
 
 // FindByPath returns the first file that matches the given path. Wildcard characters are supported.
+// FindPathSizes returns a map of full file path -> size for every file whose
+// folder path equals, or is nested under, one of the given roots. Lightweight:
+// a single query per root, no model construction or fingerprint loading.
+func (qb *FileStore) FindPathSizes(ctx context.Context, roots []string) (map[string]int64, error) {
+	out := make(map[string]int64)
+	sep := string(filepath.Separator)
+	pathExpr := "folders.path || '" + sep + "' || files.basename"
+	for _, root := range roots {
+		query := "SELECT " + pathExpr + " AS p, files.size AS s " +
+			"FROM files JOIN folders ON files.parent_folder_id = folders.id " +
+			"WHERE folders.path = ? OR folders.path LIKE ?"
+		rows, err := dbWrapper.QueryxContext(ctx, query, root, root+sep+"%")
+		if err != nil {
+			return nil, err
+		}
+		err = func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var p string
+				var s int64
+				if err := rows.Scan(&p, &s); err != nil {
+					return err
+				}
+				out[p] = s
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func (qb *FileStore) FindByPath(ctx context.Context, p string, caseSensitive bool) (models.File, error) {
 
 	ret, err := qb.FindAllByPath(ctx, p, caseSensitive)

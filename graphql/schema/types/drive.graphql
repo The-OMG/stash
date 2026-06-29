@@ -18,12 +18,75 @@ type DriveSource {
   file_count: Int!
   "whether the source is mounted and ready"
   mounted: Boolean!
+  "virtual library path the source is mounted at (selectable for scans)"
+  path: String!
 }
 
 "A Google Drive folder, for the source picker."
 type DriveFolder {
   id: String!
   name: String!
+}
+
+"Connection status of the in-app Google OAuth account."
+type GoogleAuthStatus {
+  "an account is connected (has a refresh token)"
+  connected: Boolean!
+  "an OAuth client (built-in or per-instance) is configured"
+  client_configured: Boolean!
+}
+
+"A drive selectable as a source via the connected Google account."
+type GoogleDrive {
+  "shared drive id; empty for My Drive"
+  id: String!
+  name: String!
+  my_drive: Boolean!
+}
+
+input SetGoogleOAuthClientInput {
+  client_id: String!
+  client_secret: String!
+}
+
+input MigrateDriveByPathInput {
+  "existing library path prefix to migrate from (e.g. /home/theomg/cloud)"
+  prefix: String!
+  "target Drive source id"
+  drive_id: String!
+  "require the DB file size to match the drive (recommended)"
+  require_size: Boolean
+  "preview only — make no changes"
+  dry_run: Boolean
+}
+
+"Status/result of the most recent path-based Drive migration (poll while running)."
+type MigrateDriveStatus {
+  running: Boolean!
+  drive_id: String
+  dry_run: Boolean!
+  candidates: Int!
+  migrated: Int!
+  not_in_db: Int!
+  size_mismatch: Int!
+  collision: Int!
+  "RFC3339 finish time, null if running/never run"
+  finished_at: String
+}
+
+"Result of a path-based Drive migration."
+type MigrateDriveResult {
+  "files in the drive index that were considered"
+  candidates: Int!
+  "existing DB files repointed to the drive"
+  migrated: Int!
+  "on the drive but not yet in the DB (a scan would add these)"
+  not_in_db: Int!
+  "DB file at the path but a different size (skipped)"
+  size_mismatch: Int!
+  "a file already exists at the drive path (skipped)"
+  collision: Int!
+  dry_run: Boolean!
 }
 
 input DriveBrowseInput {
@@ -60,4 +123,6 @@ input AddDriveSourceInput {
   token: String
   "import token + ids from this rclone remote name"
   rclone_remote: String
+  "fast scan: use Drive duration/dimensions and skip ffprobe (no codec detail)"
+  fast_scan: Boolean
 }

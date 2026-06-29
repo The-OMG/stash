@@ -8,6 +8,7 @@ import { useDebounce } from "src/hooks/debounce";
 import TextUtils from "src/utils/text";
 import { useDirectoryPaths } from "./useDirectoryPaths";
 import { PatchComponent } from "src/patch";
+import { useDriveSourcesQuery } from "src/core/generated-graphql";
 
 interface IProps {
   currentDirectory: string;
@@ -38,8 +39,16 @@ const _FolderSelect: React.FC<IProps> = ({
     hideError
   );
 
+  // Expose native Google Drive source roots in every folder picker (the
+  // directory() query is Drive-aware, so browsing into them works too).
+  const { data: driveData } = useDriveSourcesQuery();
+  const rootDirectories = React.useMemo(() => {
+    const roots = driveData?.driveSources.map((s) => s.path) ?? [];
+    return Array.from(new Set([...defaultDirectories, ...roots]));
+  }, [defaultDirectories, driveData]);
+
   const selectableDirectories =
-    (currentDirectory ? directories : defaultDirectories) ?? defaultDirectories;
+    (currentDirectory ? directories : rootDirectories) ?? rootDirectories;
 
   const debouncedSetDirectory = useDebounce(setPath, 250);
 
@@ -56,7 +65,7 @@ const _FolderSelect: React.FC<IProps> = ({
   }
 
   function goUp() {
-    if (defaultDirectories?.includes(currentDirectory)) {
+    if (rootDirectories?.includes(currentDirectory)) {
       setInstant("");
     } else if (parent) {
       setInstant(parent);

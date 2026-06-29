@@ -9,6 +9,7 @@ query DriveSources {
     cache_dir
     file_count
     mounted
+    path
   }
 }
 
@@ -16,9 +17,38 @@ query RcloneRemotes {
   rcloneRemotes
 }
 
+query GoogleAuthStatus {
+  googleAuthStatus {
+    connected
+    client_configured
+  }
+}
+
+query GoogleDrives {
+  googleDrives {
+    id
+    name
+    my_drive
+  }
+}
+
 query DriveBrowse($input: DriveBrowseInput!) {
   driveBrowse(input: $input) {
     id
     name
+  }
+}
+
+query DriveMigrateStatus {
+  driveMigrateStatus {
+    running
+    drive_id
+    dry_run
+    candidates
+    migrated
+    not_in_db
+    size_mismatch
+    collision
+    finished_at
   }
 }

@@ -109,6 +109,18 @@ func NewOAuthSourceFromRcloneToken(ctx context.Context, tokenJSON, clientID, cli
 	return NewOAuthSource(ctx, clientID, clientSecret, scope, &tok)
 }
 
+// OAuthConfig builds the oauth2 config for the Google Drive consent flow. The
+// caller supplies the client (built-in or per-instance) and the redirect URI.
+func OAuthConfig(clientID, clientSecret, redirectURI, scope string) *oauth2.Config {
+	return &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Endpoint:     google.Endpoint,
+		RedirectURL:  redirectURI,
+		Scopes:       []string{normalizeScope(scope)},
+	}
+}
+
 func (o *OAuthSource) Next(ctx context.Context) (*drive.Service, error)  { return o.svc, nil }
 func (o *OAuthSource) First(ctx context.Context) (*drive.Service, error) { return o.svc, nil }
 func (o *OAuthSource) Len() int                                         { return 1 }
