@@ -118,6 +118,7 @@ func (j *cleanJob) execute(ctx context.Context) error {
 	)
 
 	r := j.Repository
+	logger.Infof("Cleaning: counting tracked files and folders…")
 	if err := r.WithReadTxn(ctx, func(ctx context.Context) error {
 		var err error
 		fileCount, err = r.File.CountAllInPaths(ctx, j.options.Paths)
@@ -135,6 +136,7 @@ func (j *cleanJob) execute(ctx context.Context) error {
 		return err
 	}
 
+	logger.Infof("Cleaning: assessing %d files and %d folders", fileCount, folderCount)
 	progress.AddTotal(fileCount + folderCount)
 	progress.Definite()
 
@@ -179,6 +181,7 @@ func (j *cleanJob) assessFiles(ctx context.Context, toDelete *deleteSet) error {
 
 	more := true
 	r := j.Repository
+	assessed := 0
 
 	includeZipContents := !j.options.IgnoreZipFileContents
 
@@ -197,6 +200,10 @@ func (j *cleanJob) assessFiles(ctx context.Context, toDelete *deleteSet) error {
 				path := f.Base().Path
 				err = nil
 				fileID := f.Base().ID
+
+				if assessed++; assessed%5000 == 0 {
+					logger.Infof("Cleaning: assessed %d files, %d marked for removal", assessed, toDelete.len())
+				}
 
 				// short-cut, don't assess if already added
 				if toDelete.has(fileID) {

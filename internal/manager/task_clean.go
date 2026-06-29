@@ -148,10 +148,17 @@ type cleanFilter struct {
 }
 
 func newCleanFilter(c *config.Config) *cleanFilter {
+	stashPaths := c.GetStashPaths()
+	// Include native Google Drive source roots so their virtual paths are
+	// recognized as library paths. Without this, every Drive-backed file is
+	// "not in any stash library directory" and would be marked for deletion.
+	for _, root := range GetInstance().DriveRoots() {
+		stashPaths = append(stashPaths, &config.StashConfig{Path: root})
+	}
 	return &cleanFilter{
 		scanFilter: scanFilter{
 			extensionConfig:   newExtensionConfig(c),
-			stashPaths:        c.GetStashPaths(),
+			stashPaths:        stashPaths,
 			generatedPath:     c.GetGeneratedPath(),
 			videoExcludeRegex: generateRegexps(c.GetExcludes()),
 			imageExcludeRegex: generateRegexps(c.GetImageExcludes()),
