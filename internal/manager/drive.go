@@ -550,6 +550,7 @@ type DriveSourceStatus struct {
 	Scope        string
 	CacheDir     string
 	Path         string // virtual library root, e.g. /__gdrive__/<id>
+	FastScan     bool
 	FileCount    int
 	Mounted      bool
 }
@@ -646,7 +647,8 @@ func (s *Manager) ListDriveSources() []DriveSourceStatus {
 		st := DriveSourceStatus{
 			ID: sc.ID, Name: sc.Name, DriveID: sc.DriveID, RootFolderID: sc.RootFolderID,
 			KeysPath: sc.KeysPath, Scope: sc.Scope, CacheDir: sc.CacheDir,
-			Path: filepath.Join(driveVirtualRoot, sc.ID),
+			Path:     filepath.Join(driveVirtualRoot, sc.ID),
+			FastScan: sc.FastScan,
 		}
 		if ms, ok := mounted[sc.ID]; ok {
 			st.Mounted = true
@@ -802,6 +804,39 @@ func (j *driveSyncJob) Execute(ctx context.Context, progress *job.Progress) erro
 			return nil
 		}
 	}
+}
+
+// SetDriveSourceFastScan toggles the fast-scan option for an existing source,
+// persisting it and applying it to the live mounted source immediately (no
+// remount needed — the scan decorator reads cfg.FastScan).
+func (s *Manager) SetDriveSourceFastScan(id string, fastScan bool) error {
+	cfg, err := s.loadDriveSourcesConfig()
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range cfg.Sources {
+		if cfg.Sources[i].ID == id {
+			cfg.Sources[i].FastScan = fastScan
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("no drive source with id %q", id)
+	}
+	if err := s.saveDriveSourcesConfig(cfg); err != nil {
+		return err
+	}
+
+	s.driveMu.Lock()
+	for _, ms := range s.driveSources {
+		if ms.cfg.ID == id {
+			ms.cfg.FastScan = fastScan
+		}
+	}
+	s.driveMu.Unlock()
+	return nil
 }
 
 // SyncDriveSourceByID queues an index sync for one mounted source as a tracked

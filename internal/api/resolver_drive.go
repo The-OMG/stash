@@ -16,6 +16,7 @@ func driveSourceToGQL(st manager.DriveSourceStatus) *DriveSource {
 		FileCount: st.FileCount,
 		Mounted:   st.Mounted,
 		Path:      st.Path,
+		FastScan:  st.FastScan,
 	}
 	if st.RootFolderID != "" {
 		r := st.RootFolderID
@@ -64,6 +65,13 @@ func (r *queryResolver) GoogleDrives(ctx context.Context) ([]*GoogleDrive, error
 
 func (r *mutationResolver) SetGoogleOAuthClient(ctx context.Context, input SetGoogleOAuthClientInput) (bool, error) {
 	if err := manager.GetInstance().SetGoogleOAuthClient(input.ClientID, input.ClientSecret); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *mutationResolver) SetDriveSourceFastScan(ctx context.Context, id string, fastScan bool) (bool, error) {
+	if err := manager.GetInstance().SetDriveSourceFastScan(id, fastScan); err != nil {
 		return false, err
 	}
 	return true, nil

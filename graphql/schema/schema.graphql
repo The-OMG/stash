@@ -466,6 +466,8 @@ type Mutation {
   removeDriveSource(id: String!): Boolean!
   "Trigger an index sync (cold full or incremental) for a Drive source in the background"
   syncDriveSource(id: String!): Boolean!
+  "Toggle fast scan for an existing Drive source (applies immediately)"
+  setDriveSourceFastScan(id: String!, fast_scan: Boolean!): Boolean!
   "Set the per-instance Google OAuth client (when no built-in client is shipped)"
   setGoogleOAuthClient(input: SetGoogleOAuthClientInput!): Boolean!
   "Disconnect the Google account; clear_client also clears the OAuth client creds"

@@ -20,6 +20,8 @@ type DriveSource {
   mounted: Boolean!
   "virtual library path the source is mounted at (selectable for scans)"
   path: String!
+  "fast scan: use Drive duration/dimensions and skip ffprobe (no codec detail)"
+  fast_scan: Boolean!
 }
 
 "A Google Drive folder, for the source picker."

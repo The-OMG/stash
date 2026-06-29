@@ -20,6 +20,10 @@ mutation SyncDriveSource($id: String!) {
   syncDriveSource(id: $id)
 }
 
+mutation SetDriveSourceFastScan($id: String!, $fastScan: Boolean!) {
+  setDriveSourceFastScan(id: $id, fast_scan: $fastScan)
+}
+
 mutation SetGoogleOAuthClient($input: SetGoogleOAuthClientInput!) {
   setGoogleOAuthClient(input: $input)
 }

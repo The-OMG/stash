@@ -4,6 +4,7 @@ import {
   useDriveSourcesQuery,
   useRemoveDriveSourceMutation,
   useSyncDriveSourceMutation,
+  useSetDriveSourceFastScanMutation,
   useGoogleAuthStatusQuery,
   useSetGoogleOAuthClientMutation,
   useDisconnectGoogleDriveMutation,
@@ -19,6 +20,7 @@ export const DriveSourcesSection: React.FC = () => {
   const { data, loading, error, refetch } = useDriveSourcesQuery();
   const [removeDriveSource] = useRemoveDriveSourceMutation();
   const [syncDriveSource] = useSyncDriveSourceMutation();
+  const [setFastScan] = useSetDriveSourceFastScanMutation();
 
   const { data: authData, refetch: refetchAuth } = useGoogleAuthStatusQuery();
   const [setOAuthClient] = useSetGoogleOAuthClientMutation();
@@ -61,6 +63,16 @@ export const DriveSourcesSection: React.FC = () => {
         n.delete(id);
         return n;
       });
+    }
+  }
+
+  async function onToggleFastScan(id: string, value: boolean) {
+    try {
+      await setFastScan({ variables: { id, fastScan: value } });
+      Toast.success(`Fast scan ${value ? "enabled" : "disabled"} for "${id}"`);
+      refetch();
+    } catch (e) {
+      Toast.error(e);
     }
   }
 
@@ -275,6 +287,11 @@ export const DriveSourcesSection: React.FC = () => {
                 <th>Name</th>
                 <th>Drive ID</th>
                 <th>Files</th>
+                <th
+                  title="Use Drive's duration/resolution and skip ffprobe (much faster scans; no codec/bitrate detail)"
+                >
+                  Fast scan
+                </th>
                 <th>Status</th>
                 <th />
               </tr>
@@ -282,7 +299,7 @@ export const DriveSourcesSection: React.FC = () => {
             <tbody>
               {sources.length === 0 && (
                 <tr>
-                  <td colSpan={6}>No Google Drive sources configured.</td>
+                  <td colSpan={7}>No Google Drive sources configured.</td>
                 </tr>
               )}
               {sources.map((s) => {
@@ -303,6 +320,18 @@ export const DriveSourcesSection: React.FC = () => {
                       <code>{s.drive_id}</code>
                     </td>
                     <td>{s.file_count.toLocaleString()}</td>
+                    <td>
+                      <Form.Check
+                        type="switch"
+                        id={`fast-scan-${s.id}`}
+                        checked={s.fast_scan}
+                        disabled={removing}
+                        onChange={(e) =>
+                          onToggleFastScan(s.id, e.currentTarget.checked)
+                        }
+                        title="Use Drive duration/resolution, skip ffprobe"
+                      />
+                    </td>
                     <td>
                       {removing ? (
                         <Badge variant="warning">

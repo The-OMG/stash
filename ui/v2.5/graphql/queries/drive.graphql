@@ -10,6 +10,7 @@ query DriveSources {
     file_count
     mounted
     path
+    fast_scan
   }
 }
 
