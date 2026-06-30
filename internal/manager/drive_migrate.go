@@ -92,8 +92,15 @@ func (j *driveMigrateJob) Execute(ctx context.Context, progress *job.Progress) e
 			stop    bool
 		)
 		s, m, t := atomic.LoadInt64(&scanned), atomic.LoadInt64(&migrated), atomic.LoadInt64(&total)
+		// Before the matching loop reports any progress, the job is preloading the
+		// library path map (one pass over the whole DB) — show that explicitly so
+		// the initial (possibly slow) phase doesn't look stuck at "0 checked".
+		label := fmt.Sprintf("%s %s — %d matched / %d checked of %d", verb, j.driveName, m, s, t)
+		if s == 0 {
+			label = fmt.Sprintf("Preparing %s — loading library index…", j.driveName)
+		}
 		progress.ExecuteTask(
-			fmt.Sprintf("%s %s — %d matched / %d checked of %d", verb, j.driveName, m, s, t),
+			label,
 			func() {
 				select {
 				case err := <-done:
