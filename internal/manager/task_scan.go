@@ -144,15 +144,12 @@ const scanQueueSize = 200000
 func (j *ScanJob) queueFiles(ctx context.Context, paths []string, progress *job.Progress) error {
 	fs := file.DefaultFS()
 
-	defer func() {
-		close(j.fileQueue)
-
-		progress.AddTotal(int(j.count.Load()))
-		progress.Definite()
-	}()
-
 	// Walk in the background so the subtask can show a live count — for huge
 	// trees (and Drive backends) the walk phase is long and was otherwise silent.
+	// The walk goroutine owns all sends to j.fileQueue; we MUST wait for it to
+	// finish (done closed) before closing the queue, or we risk "send on closed
+	// channel". Cancellation is handled inside the walk (queueFileFunc returns
+	// ctx.Err()), so the goroutine drains and closes done on its own.
 	var err error
 	done := make(chan struct{})
 	go func() {
@@ -165,24 +162,23 @@ func (j *ScanJob) queueFiles(ctx context.Context, paths []string, progress *job.
 		}
 	}()
 
-	for {
-		var stop bool
+	for finished := false; !finished; {
 		progress.ExecuteTask(
 			fmt.Sprintf("Walking directory tree — %d entries, %d files queued", j.walked.Load(), j.count.Load()),
 			func() {
 				select {
 				case <-done:
-					stop = true
-				case <-ctx.Done():
-					stop = true
+					finished = true
 				case <-time.After(time.Second):
 				}
 			})
-		if stop {
-			break
-		}
 	}
 
+	// the walk goroutine has fully returned: no more sends can happen, so it is
+	// now safe to close the queue.
+	close(j.fileQueue)
+	progress.AddTotal(int(j.count.Load()))
+	progress.Definite()
 	return err
 }
 
