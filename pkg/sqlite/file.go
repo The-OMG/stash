@@ -625,15 +625,15 @@ func (qb *FileStore) find(ctx context.Context, id models.FileID) (models.File, e
 }
 
 // FindByPath returns the first file that matches the given path. Wildcard characters are supported.
-// FindPathSizes returns a map of full file path -> size for every file whose
-// folder path equals, or is nested under, one of the given roots. Lightweight:
-// a single query per root, no model construction or fingerprint loading.
-func (qb *FileStore) FindPathSizes(ctx context.Context, roots []string) (map[string]int64, error) {
-	out := make(map[string]int64)
+// FindPathInfos returns a map of full file path -> {id, size} for every file
+// whose folder path equals, or is nested under, one of the given roots.
+// Lightweight: a single query per root, no model construction or fingerprints.
+func (qb *FileStore) FindPathInfos(ctx context.Context, roots []string) (map[string]models.FilePathInfo, error) {
+	out := make(map[string]models.FilePathInfo)
 	sep := string(filepath.Separator)
 	pathExpr := "folders.path || '" + sep + "' || files.basename"
 	for _, root := range roots {
-		query := "SELECT " + pathExpr + " AS p, files.size AS s " +
+		query := "SELECT files.id AS id, " + pathExpr + " AS p, files.size AS s " +
 			"FROM files JOIN folders ON files.parent_folder_id = folders.id " +
 			"WHERE folders.path = ? OR folders.path LIKE ?"
 		rows, err := dbWrapper.QueryxContext(ctx, query, root, root+sep+"%")
@@ -643,12 +643,13 @@ func (qb *FileStore) FindPathSizes(ctx context.Context, roots []string) (map[str
 		err = func() error {
 			defer rows.Close()
 			for rows.Next() {
+				var id int
 				var p string
 				var s int64
-				if err := rows.Scan(&p, &s); err != nil {
+				if err := rows.Scan(&id, &p, &s); err != nil {
 					return err
 				}
-				out[p] = s
+				out[p] = models.FilePathInfo{ID: models.FileID(id), Size: s}
 			}
 			return rows.Err()
 		}()
@@ -657,6 +658,32 @@ func (qb *FileStore) FindPathSizes(ctx context.Context, roots []string) (map[str
 		}
 	}
 	return out, nil
+}
+
+// RepointFiles bulk-updates the parent folder for the given file ids in batches
+// (one UPDATE per batch). Used by the by-path Drive migration to avoid a full
+// per-file model update just to change one column.
+func (qb *FileStore) RepointFiles(ctx context.Context, parentFolderID models.FolderID, fileIDs []models.FileID) error {
+	const batch = 500
+	for i := 0; i < len(fileIDs); i += batch {
+		end := i + batch
+		if end > len(fileIDs) {
+			end = len(fileIDs)
+		}
+		chunk := fileIDs[i:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, 0, len(chunk)+1)
+		args = append(args, int(parentFolderID))
+		for j, id := range chunk {
+			placeholders[j] = "?"
+			args = append(args, int(id))
+		}
+		q := "UPDATE files SET parent_folder_id = ? WHERE id IN (" + strings.Join(placeholders, ",") + ")"
+		if _, err := dbWrapper.Exec(ctx, q, args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (qb *FileStore) FindByPath(ctx context.Context, p string, caseSensitive bool) (models.File, error) {

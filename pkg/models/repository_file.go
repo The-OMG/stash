@@ -16,9 +16,9 @@ type FileFinder interface {
 	FindAllByPath(ctx context.Context, path string, caseSensitive bool) ([]File, error)
 	FindAllInPaths(ctx context.Context, p []string, includeZipContents bool, limit, offset int) ([]File, error)
 	FindByPath(ctx context.Context, path string, caseSensitive bool) (File, error)
-	// FindPathSizes returns full path -> size for files under the given roots
-	// (lightweight; no model/fingerprint loading).
-	FindPathSizes(ctx context.Context, roots []string) (map[string]int64, error)
+	// FindPathInfos returns full path -> {id, size} for files under the given
+	// roots (lightweight; no model/fingerprint loading).
+	FindPathInfos(ctx context.Context, roots []string) (map[string]FilePathInfo, error)
 	FindByFingerprint(ctx context.Context, fp Fingerprint) ([]File, error)
 	FindByZipFileID(ctx context.Context, zipFileID FileID) ([]File, error)
 	FindByFileInfo(ctx context.Context, info fs.FileInfo, size int64) ([]File, error)
@@ -43,6 +43,10 @@ type FileCreator interface {
 // FileUpdater provides methods to update files.
 type FileUpdater interface {
 	Update(ctx context.Context, f File) error
+	// RepointFiles bulk-updates the parent folder of the given files (used by the
+	// by-path Drive migration; a single UPDATE per batch instead of per-file
+	// model updates).
+	RepointFiles(ctx context.Context, parentFolderID FolderID, fileIDs []FileID) error
 }
 
 // FileDestroyer provides methods to destroy files.

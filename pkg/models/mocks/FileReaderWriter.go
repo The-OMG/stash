@@ -245,16 +245,16 @@ func (_m *FileReaderWriter) FindByPath(ctx context.Context, path string, caseSen
 	return r0, r1
 }
 
-// FindPathSizes provides a mock function with given fields: ctx, roots
-func (_m *FileReaderWriter) FindPathSizes(ctx context.Context, roots []string) (map[string]int64, error) {
+// FindPathInfos provides a mock function with given fields: ctx, roots
+func (_m *FileReaderWriter) FindPathInfos(ctx context.Context, roots []string) (map[string]models.FilePathInfo, error) {
 	ret := _m.Called(ctx, roots)
 
-	var r0 map[string]int64
-	if rf, ok := ret.Get(0).(func(context.Context, []string) map[string]int64); ok {
+	var r0 map[string]models.FilePathInfo
+	if rf, ok := ret.Get(0).(func(context.Context, []string) map[string]models.FilePathInfo); ok {
 		r0 = rf(ctx, roots)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(map[string]int64)
+			r0 = ret.Get(0).(map[string]models.FilePathInfo)
 		}
 	}
 
@@ -266,6 +266,20 @@ func (_m *FileReaderWriter) FindPathSizes(ctx context.Context, roots []string) (
 	}
 
 	return r0, r1
+}
+
+// RepointFiles provides a mock function with given fields: ctx, parentFolderID, fileIDs
+func (_m *FileReaderWriter) RepointFiles(ctx context.Context, parentFolderID models.FolderID, fileIDs []models.FileID) error {
+	ret := _m.Called(ctx, parentFolderID, fileIDs)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, models.FolderID, []models.FileID) error); ok {
+		r0 = rf(ctx, parentFolderID, fileIDs)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
 }
 
 // FindByZipFileID provides a mock function with given fields: ctx, zipFileID

@@ -197,19 +197,17 @@ func (s *Manager) MigrateToDriveByPath(ctx context.Context, prefix, driveID stri
 	driveRoots := s.DriveRoots()
 	folderCache := map[string]models.FolderID{}
 
-	// Preload (one paginated scan each) the DB file paths+sizes under the prefix,
-	// and the paths already under the drive root, so matching is in-memory rather
-	// than a point query per index file — far fewer queries / much less lock
-	// contention than 100k+ individual FindByPath calls.
-	var dbPaths map[string]int64
+	// Preload path->{id,size} under the prefix, and the set of paths already on
+	// the drive, so matching is in-memory rather than a query per index file.
+	var dbPaths map[string]models.FilePathInfo
 	driveExisting := make(map[string]struct{})
 	if err := repo.WithReadTxn(ctx, func(ctx context.Context) error {
 		var e error
-		dbPaths, e = repo.File.FindPathSizes(ctx, []string{prefix})
+		dbPaths, e = repo.File.FindPathInfos(ctx, []string{prefix})
 		if e != nil {
 			return e
 		}
-		drive, e := repo.File.FindPathSizes(ctx, []string{driveRoot})
+		drive, e := repo.File.FindPathInfos(ctx, []string{driveRoot})
 		if e != nil {
 			return e
 		}
@@ -222,61 +220,32 @@ func (s *Manager) MigrateToDriveByPath(ctx context.Context, prefix, driveID stri
 	}
 	logger.Infof("drive-migrate[%s]: preloaded %d DB paths under %s (%d already on drive)", driveID, len(dbPaths), prefix, len(driveExisting))
 
-	processOne := func(ctx context.Context, rel string, size int64) error {
-		mountPath := prefixSlash + rel
-		dbSize, ok := dbPaths[mountPath]
-		if !ok {
+	// matchOne classifies a drive-index file against the preloaded DB maps,
+	// updating skip counters; returns the file info + target drive path on a hit.
+	matchOne := func(rel string, size int64) (models.FilePathInfo, string, bool) {
+		pi, exists := dbPaths[prefixSlash+rel]
+		if !exists {
 			stats.NotInDB++
-			return nil
+			return models.FilePathInfo{}, "", false
 		}
-		if requireSize && dbSize != size {
+		if requireSize && pi.Size != size {
 			stats.SizeMismatch++
-			return nil
+			return models.FilePathInfo{}, "", false
 		}
-		if dryRun {
-			stats.Migrated++
-			return nil
-		}
-
-		drivePath := driveRoot + "/" + rel
-		if _, clash := driveExisting[drivePath]; clash {
+		dp := driveRoot + "/" + rel
+		if _, clash := driveExisting[dp]; clash {
 			stats.Collision++
-			return nil
+			return models.FilePathInfo{}, "", false
 		}
-		driveDir := path.Dir(drivePath)
-		folderID, ok := folderCache[driveDir]
-		if !ok {
-			fldr, err := file.GetOrCreateFolderHierarchy(ctx, repo.Folder, driveDir, driveRoots)
-			if err != nil {
-				return fmt.Errorf("folder %q: %w", driveDir, err)
-			}
-			folderID = fldr.ID
-			folderCache[driveDir] = folderID
-		}
-		dbf, err := repo.File.FindByPath(ctx, mountPath, true)
-		if err != nil {
-			return err
-		}
-		if dbf == nil {
-			stats.NotInDB++
-			return nil
-		}
-		b := dbf.Base()
-		b.ParentFolderID = folderID
-		b.Path = drivePath
-		if err := repo.File.Update(ctx, dbf); err != nil {
-			return fmt.Errorf("update file %d: %w", b.ID, err)
-		}
-		driveExisting[drivePath] = struct{}{} // guard re-collision within this run
-		stats.Migrated++
-		return nil
+		return pi, dp, true
 	}
 
 	if dryRun {
-		// pure in-memory map lookups — no per-file DB query
 		for i, f := range files {
-			_ = processOne(ctx, f.RelPath, f.Size)
-			if i%2000 == 0 {
+			if _, _, ok := matchOne(f.RelPath, f.Size); ok {
+				stats.Migrated++
+			}
+			if i%5000 == 0 {
 				report(i)
 			}
 			if ctx.Err() != nil {
@@ -288,7 +257,10 @@ func (s *Manager) MigrateToDriveByPath(ctx context.Context, prefix, driveID stri
 		return stats, nil
 	}
 
-	const batch = 500
+	// Real run, phase 1: match + ensure the target drive folders exist (batched
+	// write txns), grouping matched file ids by their destination folder.
+	folderFiles := map[models.FolderID][]models.FileID{}
+	const batch = 1000
 	for i := 0; i < len(files); i += batch {
 		end := i + batch
 		if end > len(files) {
@@ -297,9 +269,23 @@ func (s *Manager) MigrateToDriveByPath(ctx context.Context, prefix, driveID stri
 		chunk := files[i:end]
 		if err := repo.WithTxn(ctx, func(ctx context.Context) error {
 			for _, f := range chunk {
-				if err := processOne(ctx, f.RelPath, f.Size); err != nil {
-					return err
+				pi, drivePath, ok := matchOne(f.RelPath, f.Size)
+				if !ok {
+					continue
 				}
+				driveDir := path.Dir(drivePath)
+				folderID, cached := folderCache[driveDir]
+				if !cached {
+					fldr, err := file.GetOrCreateFolderHierarchy(ctx, repo.Folder, driveDir, driveRoots)
+					if err != nil {
+						return fmt.Errorf("folder %q: %w", driveDir, err)
+					}
+					folderID = fldr.ID
+					folderCache[driveDir] = folderID
+				}
+				folderFiles[folderID] = append(folderFiles[folderID], pi.ID)
+				driveExisting[drivePath] = struct{}{}
+				stats.Migrated++
 			}
 			return nil
 		}); err != nil {
@@ -309,6 +295,37 @@ func (s *Manager) MigrateToDriveByPath(ctx context.Context, prefix, driveID stri
 		if ctx.Err() != nil {
 			return stats, ctx.Err()
 		}
+	}
+
+	// Phase 2: bulk-repoint the matched files (one UPDATE per batch per folder),
+	// a handful of folders per transaction.
+	const folderTxn = 200
+	pending := make([]models.FolderID, 0, folderTxn)
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		err := repo.WithTxn(ctx, func(ctx context.Context) error {
+			for _, fid := range pending {
+				if err := repo.File.RepointFiles(ctx, fid, folderFiles[fid]); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		pending = pending[:0]
+		return err
+	}
+	for fid := range folderFiles {
+		pending = append(pending, fid)
+		if len(pending) >= folderTxn {
+			if err := flush(); err != nil {
+				return stats, err
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return stats, err
 	}
 
 	logger.Infof("drive-migrate[%s]: migrated %d, not-in-db %d, size-mismatch %d, collision %d",

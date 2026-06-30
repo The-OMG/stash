@@ -54,6 +54,12 @@ func (e HashAlgorithm) MarshalGQL(w io.Writer) {
 }
 
 // ID represents an ID of a file.
+// FilePathInfo is a lightweight (id, size) pairing for a file at a known path.
+type FilePathInfo struct {
+	ID   FileID
+	Size int64
+}
+
 type FileID int32
 
 func (i FileID) String() string {
