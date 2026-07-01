@@ -1,0 +1,118 @@
+# Fork CI for the native-Google-Drive branch.
+# - On push/PR to gdrive-native: regenerate code, build backend + frontend, run
+#   the pkg/drive unit tests.
+# - Weekly: dry-merge upstream develop and build, so we learn early (on our own
+#   schedule) when upstream changes would break the fork.
+name: fork-ci
+
+on:
+  push:
+    branches: [gdrive-native]
+  pull_request:
+    branches: [gdrive-native]
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC — upstream compatibility check
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: ui/v2.5/pnpm-lock.yaml
+
+      - name: Install UI deps
+        run: make pre-ui
+
+      - name: Generate (backend + frontend codegen + mocks)
+        run: |
+          make generate
+          make generate-test-mocks
+
+      - name: Build backend
+        run: go build ./...
+
+      - name: Unit tests (drive engine)
+        run: go test ./pkg/drive/...
+
+      - name: Type-check frontend
+        working-directory: ui/v2.5
+        run: pnpm run check
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+
+      - name: Build frontend
+        run: make ui
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+
+      - name: Build binary (embeds UI)
+        run: make build
+
+  upstream-compat:
+    # Dry-merge upstream develop and build — reports breakage early.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/stashapp/stash.git
+          git fetch upstream develop --tags
+
+      - name: Dry-merge upstream/develop
+        run: |
+          git config user.email ci@example.com
+          git config user.name fork-ci
+          if ! git merge --no-commit --no-ff upstream/develop; then
+            echo "::error::Merging upstream/develop into gdrive-native has CONFLICTS — a manual sync is needed."
+            git merge --abort || true
+            exit 1
+          fi
+          echo "Clean merge with upstream/develop."
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: ui/v2.5/pnpm-lock.yaml
+
+      - name: Install + generate + build against upstream
+        run: |
+          make pre-ui
+          make generate
+          make generate-test-mocks
+          go build ./...
+          go test ./pkg/drive/...
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
