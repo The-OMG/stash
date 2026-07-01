@@ -30,6 +30,11 @@ cd "$(git rev-parse --show-toplevel)"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "$BRANCH" ] || die "checkout $BRANCH first (on $(git rev-parse --abbrev-ref HEAD))"
 [ -z "$(git status --porcelain)" ] || die "working tree not clean — commit or stash first"
 
+# Reuse recorded conflict resolutions from prior syncs (the mediapath hook edits
+# recur on every release rebase — rerere replays them automatically).
+git config rerere.enabled true
+git config rerere.autoupdate true
+
 say "Fetching $UPSTREAM_REMOTE (tags + branches)"
 git fetch "$UPSTREAM_REMOTE" --tags --prune
 # shallow clones can't compute a merge base far back — deepen once if needed
@@ -39,12 +44,16 @@ if [ -f .git/shallow ]; then
 fi
 
 # --- pick the target ref -----------------------------------------------------
-TARGET="${1:-}"
-if [ -z "$TARGET" ]; then
-  TARGET="$(git tag -l 'v*' --sort=-v:refname --merged "$UPSTREAM_REMOTE/develop" 2>/dev/null | head -1)"
-  [ -n "$TARGET" ] || TARGET="$(git tag -l 'v*' --sort=-v:refname | head -1)"
-  [ -n "$TARGET" ] || TARGET="$UPSTREAM_REMOTE/develop"
-fi
+# Default: the latest STABLE upstream release tag (vX.Y.Z, excluding pre-releases).
+# The fork tracks releases, not develop, so prod and the fork stay on the same
+# schema/API line. Pass an explicit ref to override:
+#   scripts/sync-upstream.sh v0.32.0        # a specific release
+#   scripts/sync-upstream.sh origin/develop # bleeding edge (may drop us onto unreleased API)
+latest_release() {
+  git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+}
+TARGET="${1:-$(latest_release)}"
+[ -n "$TARGET" ] || die "could not determine latest release tag — pass one explicitly"
 say "Rebasing $BRANCH onto: $TARGET  ($(git rev-parse --short "$TARGET" 2>/dev/null || echo '?'))"
 echo "  (our commits: $(git rev-list --count "$TARGET..$BRANCH" 2>/dev/null || echo '?'))"
 read -r -p "Proceed with rebase? [y/N] " ans; [ "$ans" = y ] || die "aborted"
@@ -54,8 +63,20 @@ git tag -f "backup/${BRANCH}-presync" "$BRANCH" >/dev/null   # safety tag to rec
 if ! git rebase "$TARGET"; then
   die "rebase hit conflicts. Resolve them (git status), 'git rebase --continue', then re-run
      the codegen/build below manually. To bail out: git rebase --abort
-     Recover the pre-sync state anytime: git reset --hard backup/${BRANCH}-presync"
+     Recover the pre-sync state anytime: git reset --hard backup/${BRANCH}-presync
+
+     Common conflicts on a release rebase:
+       - mediapath hooks (phash.go / thumbnail.go / marker_preview.go / image/scan.go):
+         take the release's version of the function, re-apply only our thin hook.
+       - go.mod/go.sum: 'git checkout --ours go.mod go.sum && go mod tidy' re-derives
+         our deps (google.golang.org/api, x/oauth2) at versions the release's Go allows."
 fi
+
+# --- reconcile the dependency graph ------------------------------------------
+# The release may pin older Go / dep versions than the branch was built on; tidy
+# re-resolves our extra deps (google.golang.org/api, x/oauth2) against it.
+say "Reconciling go.mod against the release (go mod tidy)"
+go mod tidy
 
 # --- regenerate code (schema-driven) -----------------------------------------
 say "Regenerating backend + frontend code (make generate + mocks)"

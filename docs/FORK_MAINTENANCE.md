@@ -33,24 +33,42 @@ fork    ->  github.com/The-OMG/stash     (yours)
 
 ## Routine sync (per upstream release)
 
+The fork tracks **stable releases**, not develop — this keeps the fork on the same
+schema/API line that prod actually runs (currently **v0.31.1**), so a build is a
+true drop-in. Each time upstream ships a release:
+
 ```bash
 git checkout gdrive-native
-scripts/sync-upstream.sh              # rebases onto the latest upstream release tag
-# ... resolve any conflicts if prompted, then re-run codegen/build ...
+scripts/sync-upstream.sh              # rebases onto the latest stable release tag
+# ... resolve any conflicts if prompted (rerere replays known ones), then it builds ...
 git push --force-with-lease fork gdrive-native
 ```
 
-`sync-upstream.sh` fetches upstream, rebases (onto the latest `v*` tag by default —
-track **releases**, not `develop`, for fewer/more-stable merges), then runs
-`make generate` + mocks, `go build ./...`, `go test ./pkg/drive/...`,
-`make ui`, and `make build`. It tags `backup/gdrive-native-presync` first so you can
-always `git reset --hard` back. It never pushes for you.
+`sync-upstream.sh` fetches upstream, rebases our commits onto the **latest `vX.Y.Z`
+release tag** by default (pass an explicit ref to override, e.g. `origin/develop`
+for bleeding edge), enables `git rerere` so previously-recorded hook resolutions
+replay automatically, then runs `go mod tidy`, `make generate` + mocks,
+`go build ./...`, `go test ./pkg/drive/...`, `make ui`, and `make build`. It tags
+`backup/gdrive-native-presync` first so you can always `git reset --hard` back. It
+never pushes for you.
+
+**Current base: v0.31.1.** The one-time move from a develop base onto v0.31.1 (done
+2026-07-01) required resolving four mediapath-hook conflicts and the go.mod dep graph
+(see below); those resolutions are now recorded in `.git/rr-cache`, so re-rebasing
+onto the *next* release should replay them with little or no manual work. Rebasing
+onto a release **drops develop-only upstream features** we were briefly built on
+(e.g. the phash `slowSeek` retry and marker `maxDuration`/`defaultDuration`); they
+return automatically, with our hook re-applied, once a release ships them.
 
 ## What to expect on a rebase
 
 - **No conflicts** (common): additive files + untouched core → the script just
-  regenerates + builds. ~1–3 hours including a smoke test. Toolchain: Go `1.25.x`,
-  `pnpm@10.x`.
+  regenerates + builds. ~1–3 hours including a smoke test. Toolchain is
+  **release-pinned** — read it from the release's own files, don't assume: v0.31.1
+  wants Go `1.24.x` (`go.mod`) and TypeScript `4.8.x` (`ui/v2.5/package.json`), so
+  after the rebase run `pnpm install` to snap `node_modules` back to the release's
+  deps (a stale newer `node_modules` throws e.g. `Cannot find type definition file
+  for 'dom-screen-wake-lock'`). `pnpm@10.x` drives the install regardless.
 - **Small conflicts** (typical): upstream edited near one of our hook points. Resolve
   the few marked lines, `git rebase --continue`, finish the build.
 - **Real rework** (occasional): upstream refactors a subsystem we hook into — watch
